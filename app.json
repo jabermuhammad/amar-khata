@@ -1,25 +1,60 @@
 {
   "expo": {
-    "name": "android-app",
-    "slug": "android-app",
-    "version": "1.0.0",
+    "name": "আমার খাতা",
+    "slug": "amar-khata-mobile",
+    "scheme": "amarkhata",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true
     },
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
-      "predictiveBackGestureEnabled": false
+      "icon": "./assets/icon.png",
+      "predictiveBackGestureEnabled": false,
+      "softwareKeyboardLayoutMode": "resize",
+      "permissions": ["android.permission.REQUEST_INSTALL_PACKAGES"],
+      "package": "com.jabermuhammad1.amarkhatamobile",
+      "versionCode": 2
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "প্রোফাইল ছবির জন্য গ্যালারি থেকে ছবি বেছে নিন।",
+          "cameraPermission": "প্রোফাইল ছবি তুলতে ক্যামেরা ব্যবহার করুন।",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FFFFFF",
+          "image": "./assets/icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#000000",
+            "image": "./assets/icon.png"
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "73bcea3c-96cc-4f49-8bf4-3fc2f9e0d068"
+      }
+    },
+    "owner": "jabermuhammad1"
   }
 }

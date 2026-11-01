@@ -1,0 +1,23 @@
+{
+  "build": {
+    "preview": {
+      "distribution": "internal",
+      "environment": "preview",
+      "pnpm": "11.25.0",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "distribution": "internal",
+      "environment": "production",
+      "pnpm": "11.25.0",
+      "env": {
+        "EXPO_PUBLIC_UPDATE_MANIFEST_URL": "https://raw.githubusercontent.com/jabermuhammad/amar-khata-updates/main/update.json"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    }
+  }
+}

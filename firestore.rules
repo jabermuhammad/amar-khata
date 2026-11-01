@@ -1,0 +1,263 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function verified() { return signedIn() && request.auth.token.email_verified == true; }
+    function listMember(listId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/shoppingLists/$(listId))
+        && exists(/databases/$(database)/documents/shoppingLists/$(listId)/members/$(request.auth.uid));
+    }
+    function noteMember(noteId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/notes/$(noteId))
+        && exists(/databases/$(database)/documents/notes/$(noteId)/members/$(request.auth.uid));
+    }
+    function listActive(listId) {
+      return listMember(listId)
+        && (!('deleting' in get(/databases/$(database)/documents/shoppingLists/$(listId)).data)
+          || get(/databases/$(database)/documents/shoppingLists/$(listId)).data.deleting != true);
+    }
+    function noteActive(noteId) {
+      return noteMember(noteId)
+        && (!('deleting' in get(/databases/$(database)/documents/notes/$(noteId)).data)
+          || get(/databases/$(database)/documents/notes/$(noteId)).data.deleting != true);
+    }
+    function listActiveAfter(listId) {
+      return existsAfter(/databases/$(database)/documents/shoppingLists/$(listId))
+        && (!('deleting' in getAfter(/databases/$(database)/documents/shoppingLists/$(listId)).data)
+          || getAfter(/databases/$(database)/documents/shoppingLists/$(listId)).data.deleting != true);
+    }
+    function noteActiveAfter(noteId) {
+      return existsAfter(/databases/$(database)/documents/notes/$(noteId))
+        && (!('deleting' in getAfter(/databases/$(database)/documents/notes/$(noteId)).data)
+          || getAfter(/databases/$(database)/documents/notes/$(noteId)).data.deleting != true);
+    }
+    function listRole(listId) {
+      return get(/databases/$(database)/documents/shoppingLists/$(listId)/members/$(request.auth.uid)).data.permission;
+    }
+    function noteRole(noteId) {
+      return get(/databases/$(database)/documents/notes/$(noteId)/members/$(request.auth.uid)).data.permission;
+    }
+    function listOwner(listId) { return listMember(listId) && listRole(listId) == 'owner'; }
+    function noteOwner(noteId) { return noteMember(noteId) && noteRole(noteId) == 'owner'; }
+    function listEditor(listId) { return listActive(listId) && listRole(listId) in ['owner', 'editor']; }
+    function listEditorAfter(listId) {
+      return signedIn()
+        && listActiveAfter(listId)
+        && existsAfter(/databases/$(database)/documents/shoppingLists/$(listId)/members/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/shoppingLists/$(listId)/members/$(request.auth.uid)).data.permission in ['owner', 'editor'];
+    }
+    function noteEditor(noteId) { return noteActive(noteId) && noteRole(noteId) in ['owner', 'editor']; }
+    function hasKeysOnly(data, keys) { return data.keys().hasOnly(keys); }
+    function resourceRefMatches(uid, refId, kind, resourceId, permission) {
+      let ref = getAfter(/databases/$(database)/documents/users/$(uid)/resourceRefs/$(refId)).data;
+      return ref.kind == kind
+        && ref.resourceId == resourceId
+        && ref.permission == permission;
+    }
+    function invitedBy(inviteId, kind, resourceId) {
+      let invite = getAfter(/databases/$(database)/documents/invites/$(inviteId)).data;
+      return verified()
+        && invite.kind == kind
+        && invite.resourceId == resourceId
+        && invite.status == 'accepted'
+        && invite.acceptedBy == request.auth.uid
+        && invite.targetEmail == request.auth.token.email.lower()
+        && invite.expiresAt > request.time
+        && ((kind == 'list'
+          && listActiveAfter(resourceId)
+          && getAfter(/databases/$(database)/documents/shoppingLists/$(resourceId)).data.ownerUid == invite.ownerUid)
+          || (kind == 'note'
+          && noteActiveAfter(resourceId)
+          && getAfter(/databases/$(database)/documents/notes/$(resourceId)).data.ownerUid == invite.ownerUid));
+    }
+    function acceptedInviteHasMembership(inviteId) {
+      return (resource.data.kind == 'list'
+        && listActiveAfter(resource.data.resourceId)
+        && existsAfter(/databases/$(database)/documents/shoppingLists/$(resource.data.resourceId)/members/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/shoppingLists/$(resource.data.resourceId)/members/$(request.auth.uid)).data.permission == resource.data.permission
+        && getAfter(/databases/$(database)/documents/shoppingLists/$(resource.data.resourceId)/members/$(request.auth.uid)).data.inviteId == inviteId
+        && resourceRefMatches(request.auth.uid, 'list-' + resource.data.resourceId, 'list', resource.data.resourceId, resource.data.permission))
+        || (resource.data.kind == 'note'
+        && noteActiveAfter(resource.data.resourceId)
+        && existsAfter(/databases/$(database)/documents/notes/$(resource.data.resourceId)/members/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/notes/$(resource.data.resourceId)/members/$(request.auth.uid)).data.permission == resource.data.permission
+        && getAfter(/databases/$(database)/documents/notes/$(resource.data.resourceId)/members/$(request.auth.uid)).data.inviteId == inviteId
+        && resourceRefMatches(request.auth.uid, 'note-' + resource.data.resourceId, 'note', resource.data.resourceId, resource.data.permission));
+    }
+
+    match /shoppingLists/{listId} {
+      allow create: if verified()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['ownerUid', 'title', 'category', 'createdAt', 'updatedAt', 'schemaVersion'])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 120
+        && (!('category' in request.resource.data) || request.resource.data.category in ['today', 'monthly', 'gift'])
+        && getAfter(/databases/$(database)/documents/shoppingLists/$(listId)/members/$(request.auth.uid)).data.permission == 'owner';
+      allow read: if listActive(listId) || listOwner(listId);
+      allow update: if listOwner(listId) && (
+        (listActive(listId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'category', 'updatedAt'])
+          && request.resource.data.title is string
+          && request.resource.data.title.size() <= 120)
+        || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleting'])
+          && request.resource.data.deleting == true));
+      allow delete: if listOwner(listId)
+        && resource.data.deleting == true
+        && !existsAfter(/databases/$(database)/documents/shoppingLists/$(listId))
+        && !existsAfter(/databases/$(database)/documents/shoppingLists/$(listId)/members/$(request.auth.uid));
+
+      match /members/{memberUid} {
+        allow read: if listOwner(listId) || signedIn() && memberUid == request.auth.uid;
+        allow create: if verified() && request.resource.data.uid == memberUid
+          && request.resource.data.keys().hasOnly(['uid', 'permission', 'joinedAt', 'inviteId', 'email'])
+          && listActiveAfter(listId)
+          && ((memberUid == request.auth.uid
+            && request.resource.data.permission == 'owner'
+            && getAfter(/databases/$(database)/documents/shoppingLists/$(listId)).data.ownerUid == request.auth.uid)
+            || (request.resource.data.inviteId is string
+              && invitedBy(request.resource.data.inviteId, 'list', listId)
+              && request.resource.data.email == request.auth.token.email.lower()
+              && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteId)).data.permission == request.resource.data.permission));
+        allow update: if listOwner(listId) && listActive(listId)
+          && memberUid != request.auth.uid
+          && resource.data.permission != 'owner'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission'])
+          && request.resource.data.permission in ['shopper', 'editor']
+          && resourceRefMatches(memberUid, 'list-' + listId, 'list', listId, request.resource.data.permission);
+        allow delete: if listOwner(listId) && (memberUid != request.auth.uid
+          || !existsAfter(/databases/$(database)/documents/shoppingLists/$(listId)))
+          || signedIn() && memberUid == request.auth.uid && resource.data.permission != 'owner';
+      }
+
+      match /items/{itemId} {
+        allow read: if listActive(listId) || listOwner(listId);
+        allow create: if (listEditor(listId) || listEditorAfter(listId))
+          && request.resource.data.keys().hasOnly(['name', 'qty', 'status', 'price', 'createdAt', 'updatedAt', 'updatedBy'])
+          && request.resource.data.name is string
+          && request.resource.data.qty is string
+          && request.resource.data.status in ['new', 'pending', 'purchased', 'omitted']
+          && (!('price' in request.resource.data) || request.resource.data.price is number && request.resource.data.price >= 0)
+          && request.resource.data.updatedBy == request.auth.uid;
+        allow update: if (listEditor(listId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'qty', 'status', 'price', 'updatedAt', 'updatedBy'])
+          && request.resource.data.name is string
+          && request.resource.data.qty is string
+          && request.resource.data.status in ['new', 'pending', 'purchased', 'omitted']
+          && (!('price' in request.resource.data) || request.resource.data.price is number && request.resource.data.price >= 0)
+          && request.resource.data.updatedBy == request.auth.uid)
+          || (listActive(listId) && listRole(listId) == 'shopper'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['price', 'status', 'updatedAt', 'updatedBy'])
+          && (!('price' in request.resource.data) || request.resource.data.price is number && request.resource.data.price >= 0)
+          && request.resource.data.updatedBy == request.auth.uid
+          && request.resource.data.status in ['pending', 'purchased']);
+        allow delete: if listEditor(listId)
+          || listOwner(listId) && get(/databases/$(database)/documents/shoppingLists/$(listId)).data.deleting == true;
+      }
+    }
+
+    match /notes/{noteId} {
+      allow create: if verified()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['ownerUid', 'title', 'body', 'createdAt', 'updatedAt', 'revision', 'schemaVersion'])
+        && request.resource.data.title is string
+        && request.resource.data.body is string
+        && request.resource.data.revision == 0
+        && getAfter(/databases/$(database)/documents/notes/$(noteId)/members/$(request.auth.uid)).data.permission == 'owner';
+      allow read: if noteActive(noteId) || noteOwner(noteId);
+      allow update: if (noteEditor(noteId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'body', 'revision', 'updatedAt', 'updatedBy'])
+          && request.resource.data.title is string
+          && request.resource.data.body is string
+          && request.resource.data.revision == resource.data.revision + 1
+          && request.resource.data.updatedBy == request.auth.uid)
+        || (noteOwner(noteId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleting'])
+          && request.resource.data.deleting == true);
+      allow delete: if noteOwner(noteId)
+        && resource.data.deleting == true
+        && !existsAfter(/databases/$(database)/documents/notes/$(noteId))
+        && !existsAfter(/databases/$(database)/documents/notes/$(noteId)/members/$(request.auth.uid));
+
+      match /members/{memberUid} {
+        allow read: if noteOwner(noteId) || signedIn() && memberUid == request.auth.uid;
+        allow create: if verified() && request.resource.data.uid == memberUid
+          && request.resource.data.keys().hasOnly(['uid', 'permission', 'joinedAt', 'inviteId', 'email'])
+          && noteActiveAfter(noteId)
+          && ((memberUid == request.auth.uid
+            && request.resource.data.permission == 'owner'
+            && getAfter(/databases/$(database)/documents/notes/$(noteId)).data.ownerUid == request.auth.uid)
+            || (request.resource.data.inviteId is string
+              && invitedBy(request.resource.data.inviteId, 'note', noteId)
+              && request.resource.data.email == request.auth.token.email.lower()
+              && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteId)).data.permission == request.resource.data.permission));
+        allow update: if noteOwner(noteId) && noteActive(noteId)
+          && memberUid != request.auth.uid
+          && resource.data.permission != 'owner'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission'])
+          && request.resource.data.permission in ['viewer', 'editor']
+          && resourceRefMatches(memberUid, 'note-' + noteId, 'note', noteId, request.resource.data.permission);
+        allow delete: if noteOwner(noteId) && (memberUid != request.auth.uid
+          || !existsAfter(/databases/$(database)/documents/notes/$(noteId)))
+          || signedIn() && memberUid == request.auth.uid && resource.data.permission != 'owner';
+      }
+    }
+
+    match /users/{uid}/resourceRefs/{refId} {
+      allow read: if signedIn() && (request.auth.uid == uid
+        || resource.data.kind == 'list' && listOwner(resource.data.resourceId)
+        || resource.data.kind == 'note' && noteOwner(resource.data.resourceId));
+      allow create: if verified() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['kind', 'resourceId', 'permission', 'createdAt'])
+        && ((request.resource.data.kind == 'list'
+          && refId == 'list-' + request.resource.data.resourceId
+          && listActiveAfter(request.resource.data.resourceId)
+          && getAfter(/databases/$(database)/documents/shoppingLists/$(request.resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission)
+          || (request.resource.data.kind == 'note'
+          && refId == 'note-' + request.resource.data.resourceId
+          && noteActiveAfter(request.resource.data.resourceId)
+          && getAfter(/databases/$(database)/documents/notes/$(request.resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission));
+      allow update: if verified()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission'])
+        && ((resource.data.kind == 'list'
+          && refId == 'list-' + resource.data.resourceId
+          && listOwner(resource.data.resourceId)
+          && listActive(resource.data.resourceId)
+          && getAfter(/databases/$(database)/documents/shoppingLists/$(resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission)
+          || (resource.data.kind == 'note'
+          && refId == 'note-' + resource.data.resourceId
+          && noteOwner(resource.data.resourceId)
+          && noteActive(resource.data.resourceId)
+          && getAfter(/databases/$(database)/documents/notes/$(resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission));
+      allow delete: if signedIn() && (request.auth.uid == uid
+        || resource.data.kind == 'list' && listOwner(resource.data.resourceId)
+        || resource.data.kind == 'note' && noteOwner(resource.data.resourceId));
+    }
+
+    match /invites/{inviteId} {
+      allow create: if verified()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.targetEmail is string
+        && request.resource.data.targetEmail != request.auth.token.email.lower()
+        && request.resource.data.status == 'pending'
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt < request.time + duration.value(8, 'd')
+        && request.resource.data.keys().hasOnly(['kind', 'resourceId', 'ownerUid', 'targetEmail', 'permission', 'status', 'createdAt', 'expiresAt'])
+        && ((request.resource.data.kind == 'list' && listOwner(request.resource.data.resourceId) && listActive(request.resource.data.resourceId)
+          && request.resource.data.permission in ['shopper', 'editor'])
+          || (request.resource.data.kind == 'note' && noteOwner(request.resource.data.resourceId) && noteActive(request.resource.data.resourceId)
+          && request.resource.data.permission in ['viewer', 'editor']));
+      allow read: if verified() && (resource.data.ownerUid == request.auth.uid
+        || resource.data.targetEmail == request.auth.token.email.lower());
+      allow update: if verified() && resource.data.status == 'pending'
+        && resource.data.targetEmail == request.auth.token.email.lower()
+        && resource.data.expiresAt > request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedBy', 'acceptedAt'])
+        && request.resource.data.status == 'accepted'
+        && request.resource.data.acceptedBy == request.auth.uid
+        && acceptedInviteHasMembership(inviteId);
+      allow delete: if verified() && resource.data.ownerUid == request.auth.uid;
+    }
+  }
+}

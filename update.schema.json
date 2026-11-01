@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Amar Khata Android update manifest",
+  "type": "object",
+  "required": [
+    "packageId",
+    "version",
+    "versionCode",
+    "apkUrl",
+    "sha256",
+    "changelog",
+    "sizeBytes"
+  ],
+  "properties": {
+    "packageId": {
+      "const": "com.jabermuhammad1.amarkhatamobile"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+(\\.\\d+){1,3}$"
+    },
+    "versionCode": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "apkUrl": {
+      "type": "string",
+      "pattern": "^https://"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "changelog": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 157286400
+    }
+  }
+}
