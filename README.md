@@ -1,6 +1,6 @@
 # Amar Khata (আমার খাতা)
 
-Amar Khata is a Bengali-first Android app for organizing shopping lists and notes. It is built with Expo, React Native, TypeScript, and Expo Router.
+Amar Khata is a personal Bengali notebook and productivity app for Android, built with Expo, React Native, TypeScript, and Expo Router. It supports note-taking, personal shopping lists, cloud sync and sharing, and in-app APK update notices.
 
 ## Features
 
