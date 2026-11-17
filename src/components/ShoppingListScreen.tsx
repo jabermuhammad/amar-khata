@@ -1,42 +1,47 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Image,
-  KeyboardAvoidingView,
   Modal,
   Platform,
-  ScrollView,
   StyleSheet,
-  Text,
-  TextInput,
-  View,
   ActivityIndicator,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import * as Print from 'expo-print';
-import { bn, normalizeStoredLists, removeEmptyLocalListDrafts, STORE, type Item, type ListCategory, type ListId, type ShoppingList } from '../data';
+import { ThemedKeyboardAvoidingView as KeyboardAvoidingView, ThemedScrollView as ScrollView, ThemedText as Text, ThemedTextInput as TextInput, ThemedView as View, ThemedSafeAreaView as SafeAreaView, ThemedIcon } from './ThemePrimitives';
+import { useTheme } from '../contexts/ThemeContext';
+import { bn, normalizeStoredLists, removeEmptyLocalListDrafts, type Item, type ListCategory, type ListId, type ShoppingList } from '../data';
 import ShoppingCartIcon from './ShoppingCartIcon';
 import ShareDialog from './ShareDialog';
+import PdfCenterModal from './PdfCenterModal';
 import { GlossyPressable as Pressable } from './GlossyPressable';
 import { useAuth } from '../contexts/AuthContext';
-import { addRemoteItem, deleteRemoteItem, updateRemoteItem, updateRemoteListTitle, watchRemoteList, type RemoteList } from '../lib/collaboration';
+import { addRemoteItem, cacheRemoteList, deleteRemoteItem, flushPendingCloudChanges, getPendingCloudChanges, getRemoteList, resolvePendingCloudChange, retryBlockedCloudChange, updateRemoteItem, updateRemoteListTitle, watchRemoteList, type RemoteList } from '../lib/collaboration';
+import { readLists, storageScopeId, writeLists } from '../lib/localStorage';
+import { goBackOrReplace } from '../lib/navigation.mjs';
 
 const labels = { pending: 'কেনা বাকি', purchased: 'কেনা সম্পন্ন', omitted: 'তালিকা থেকে বাদ', new: 'নতুন যোগ করা হয়েছে' } as const;
 
 export default function ShoppingListScreen() {
+  const { theme } = useTheme();
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string; remoteId?: string; startAdd?: string; category?: ListCategory }>();
-  const { user } = useAuth();
+  const { user, scope, mode } = useAuth();
   const listId = params.id || 'today';
   const [activeRemoteId, setActiveRemoteId] = useState(params.remoteId || '');
   const remoteId = params.remoteId || activeRemoteId || undefined;
   const [lists, setLists] = useState<Record<ListId, ShoppingList>>({});
   const [remoteList, setRemoteList] = useState<RemoteList | null>(null);
+  const remoteListRef = useRef(remoteList);
+  const pendingTitleWrites = useRef<Promise<unknown>>(Promise.resolve());
   const [loaded, setLoaded] = useState(false);
+  const [loadedScopeId, setLoadedScopeId] = useState('');
+  const [loadedRemoteId, setLoadedRemoteId] = useState('');
+  const currentScopeId = scope ? storageScopeId(scope) : '';
+  const dataReady = remoteId ? Boolean(loaded && loadedRemoteId === remoteId) : Boolean(scope && loaded && loadedScopeId === currentScopeId);
   const [shareOpen, setShareOpen] = useState(false);
+  const [pdfCenterOpen, setPdfCenterOpen] = useState(false);
   const [addingItem, setAddingItem] = useState(false);
   const [editItem, setEditItem] = useState<Item | null>(null);
   const [editName, setEditName] = useState('');
@@ -44,55 +49,130 @@ export default function ShoppingListScreen() {
   const editQtyRef = useRef<React.ElementRef<typeof TextInput>>(null);
   const editNameRef = useRef<React.ElementRef<typeof TextInput>>(null);
   const didAutoOpenAdd = useRef(false);
+  const handledConflictIds = useRef(new Set<string>());
   const [priceItem, setPriceItem] = useState<Item | null>(null);
   const [priceText, setPriceText] = useState('');
   const [menuItem, setMenuItem] = useState<Item | null>(null);
+  useEffect(() => { remoteListRef.current = remoteList; }, [remoteList]);
 
-  const list: ShoppingList = remoteList || lists[listId] || { title: '', category: params.category, items: [] };
+  const list: ShoppingList = remoteList || (loadedScopeId === currentScopeId ? lists[listId] : undefined) || { title: '', category: params.category, items: [] };
   const remotePermission = remoteList?.permission;
   const canEditStructure = !remoteId || remotePermission === 'editor' || remotePermission === 'owner';
   const total = useMemo(() => list.items.reduce((sum, item) => sum + (item.status === 'purchased' && typeof item.price === 'number' ? item.price : 0), 0), [list.items]);
 
   useEffect(() => {
-    if (remoteId && user) {
-      return watchRemoteList(remoteId, user.uid, value => { setRemoteList(value); setLoaded(true); }, error => { setRemoteList(null); setLoaded(false); Alert.alert('শেয়ার করা তালিকা বন্ধ হয়েছে', error.message); });
+    if (remoteId && mode !== 'account') {
+      let active = true;
+      void Promise.resolve().then(() => { if (active) { setRemoteList(null); setLoaded(false); } });
+      return () => { active = false; };
+    }
+    if (remoteId && user && mode === 'account') {
+      return watchRemoteList(remoteId, user.uid, value => { setRemoteList(value); setLoadedRemoteId(remoteId); setLoaded(true); }, error => {
+        const code = (error as Error & { code?: string }).code;
+        const accessLost = code === 'permission-denied' || error.message.includes('তালিকাটি আর নেই') || error.message.includes('অনুমতি বাতিল');
+        if (accessLost) {
+          setRemoteList(null); setLoadedRemoteId(''); setLoaded(false);
+          Alert.alert('শেয়ার করা তালিকা বন্ধ হয়েছে', error.message);
+          return;
+        }
+        if (remoteListRef.current) {
+          setRemoteList(current => current ? { ...current, cached: true } : current);
+          setLoadedRemoteId(remoteId); setLoaded(true);
+        } else {
+          setLoadedRemoteId(''); setLoaded(false);
+          Alert.alert('তালিকা অফলাইনে খোলা যাচ্ছে না', 'আগে এই তালিকাটি অনলাইনে খুলে local copy তৈরি করুন, অথবা ইন্টারনেট সংযোগ ফিরিয়ে আনুন।');
+        }
+      });
     }
     let active = true;
-    AsyncStorage.getItem(STORE.lists).then(value => {
-      if (active && value) {
-        const stored = removeEmptyLocalListDrafts(normalizeStoredLists(JSON.parse(value)));
+    if (!scope) {
+      void Promise.resolve().then(() => { if (active) { setLists({}); setLoaded(false); setLoadedScopeId(''); } });
+      return () => { active = false; };
+    }
+    readLists(scope).then(storedValue => {
+      if (active) {
+        const stored = removeEmptyLocalListDrafts(normalizeStoredLists(storedValue));
         const dated = Object.fromEntries(Object.entries(stored).map(([id, saved]) => [id, { ...saved, createdAt: saved.createdAt || (saved.title.trim() ? new Date().toISOString() : undefined) }]));
         setLists(dated);
-        if (JSON.stringify(normalizeStoredLists(JSON.parse(value))) !== JSON.stringify(dated)) AsyncStorage.setItem(STORE.lists, JSON.stringify(dated)).catch(() => {});
+        setLoadedScopeId(storageScopeId(scope));
+        setLoadedRemoteId('');
+        setLoaded(true);
+        if (JSON.stringify(storedValue) !== JSON.stringify(dated)) void writeLists(scope, dated).catch(error => Alert.alert('তালিকা সংরক্ষণ হয়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।'));
       }
-    }).catch(() => {}).finally(() => { if (active) setLoaded(true); });
+    }).catch(error => { if (active) { setLoaded(false); setLoadedScopeId(''); Alert.alert('লোকাল তালিকা পড়া যায়নি', error instanceof Error ? error.message : 'ডাটা অক্ষত আছে; storage যাচাই করে আবার চেষ্টা করুন।'); } });
     return () => { active = false; };
-  }, [remoteId, user]);
-  useEffect(() => { if (!remoteId && loaded) AsyncStorage.setItem(STORE.lists, JSON.stringify(lists)).catch(() => {}); }, [lists, loaded, remoteId]);
+  }, [mode, remoteId, scope, user]);
+  useEffect(() => { if (!remoteId && loaded && scope && loadedScopeId === currentScopeId) writeLists(scope, lists).catch(error => Alert.alert('তালিকা সংরক্ষণ হয়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।')); }, [lists, loaded, loadedScopeId, currentScopeId, remoteId, scope]);
+
+  useEffect(() => {
+    if (!remoteId || !user || !remoteList) return;
+    let active = true;
+    void getPendingCloudChanges(user.uid).then(entries => {
+      if (!active) return;
+      const conflict = entries.find(entry => (entry.kind === 'list-item' || entry.kind === 'list-title') && entry.resourceId === remoteId && (entry.status === 'conflict' || entry.status === 'blocked') && !handledConflictIds.current.has(entry.id));
+      if (!conflict) return;
+      handledConflictIds.current.add(conflict.id);
+      if (conflict.status === 'blocked') {
+        Alert.alert('Cloud-এ পরিবর্তন পাঠানো যায়নি', `${conflict.error || 'পরিবর্তন ডিভাইসে অক্ষত আছে।'} Permission ঠিক হলে আবার চেষ্টা করুন।`, [
+          { text: 'আবার চেষ্টা', onPress: async () => {
+            try { await retryBlockedCloudChange(user, conflict.id); setRemoteList(await getRemoteList(remoteId, user.uid)); }
+            catch (error) { Alert.alert('আবার সিঙ্ক হয়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।'); }
+          } },
+          { text: 'পরে', style: 'cancel' },
+        ]);
+        return;
+      }
+      const actions: Parameters<typeof Alert.alert>[2] = [
+        { text: 'Cloud সংস্করণ', onPress: async () => {
+          await resolvePendingCloudChange(user.uid, conflict.id, 'remote');
+          try { setRemoteList(await getRemoteList(remoteId, user.uid)); } catch { /* Keep the visible cached copy until the listener refreshes. */ }
+        } },
+      ];
+      if (conflict.operation !== 'create-item') actions.push({ text: 'আমার পরিবর্তন রাখুন', onPress: async () => {
+        try {
+          await resolvePendingCloudChange(user.uid, conflict.id, 'local');
+          await flushPendingCloudChanges(user);
+          setRemoteList(await getRemoteList(remoteId, user.uid));
+        } catch (error) { Alert.alert('পরিবর্তন সিঙ্ক হয়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।'); }
+      } });
+      actions.push({ text: 'পরে', style: 'cancel' });
+      Alert.alert(conflict.kind === 'list-title' ? 'অন্য কেউ শিরোনাম পরিবর্তন করেছেন' : 'অন্য কেউ পণ্যটি পরিবর্তন করেছেন', 'আপনার পরিবর্তন ডিভাইসে সংরক্ষিত আছে। কোন সংস্করণ রাখবেন?', actions);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [remoteId, user, remoteList]);
 
   const updateItems = (update: (items: Item[]) => Item[]) => {
     if (remoteId && remoteList && user) {
       const previous = remoteList.items;
       const next = update(previous);
+      const optimistic = { ...remoteList, items: next };
+      setRemoteList(optimistic);
+      void cacheRemoteList(user.uid, optimistic).catch(() => {});
       const oldById = new Map(previous.map(item => [String(item.id), item]));
       const nextById = new Map(next.map(item => [String(item.id), item]));
       for (const item of next) {
         const before = oldById.get(String(item.id));
         if (!before) {
-          const { id: _id, ...fields } = item;
-          addRemoteItem(remoteId, user, fields).catch(error => Alert.alert('পণ্য যোগ হয়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।'));
+          addRemoteItem(remoteId, user, item).then(result => {
+            if (result.queued) Alert.alert('পণ্য ডিভাইসে রাখা হয়েছে', 'ইন্টারনেট ফিরে এলে সিঙ্ক হবে।');
+          }).catch(error => { if (!(error && typeof error === 'object' && 'conflict' in error)) Alert.alert('পণ্য যোগ হয়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।'); });
         } else {
           const changed: Partial<Pick<Item, 'name' | 'qty' | 'price' | 'status'>> = {};
           if (before.name !== item.name) changed.name = item.name;
           if (before.qty !== item.qty) changed.qty = item.qty;
           if (before.status !== item.status) changed.status = item.status;
           if (before.price !== item.price) changed.price = item.price;
-          if (Object.keys(changed).length) updateRemoteItem(remoteId, item.id, user, changed).catch(error => Alert.alert('পরিবর্তন সংরক্ষণ হয়নি', error instanceof Error ? error.message : 'অনুমতি বা ইন্টারনেট পরীক্ষা করুন।'));
+          if (Object.keys(changed).length) updateRemoteItem(remoteId, item.id, user, changed, Number((before as typeof item & { revision?: number }).revision || 0), before).then(result => {
+            if (result.queued) Alert.alert('পরিবর্তন ডিভাইসে রাখা হয়েছে', 'ইন্টারনেট ফিরে এলে সিঙ্ক হবে। অন্য account-এ পরিবর্তন হলে আগে conflict জানানো হবে।');
+          }).catch(error => { if (!(error && typeof error === 'object' && 'conflict' in error)) Alert.alert('পরিবর্তন সংরক্ষণ হয়নি', error instanceof Error ? error.message : 'অনুমতি বা ইন্টারনেট পরীক্ষা করুন।'); });
         }
       }
-      for (const item of previous) if (!nextById.has(String(item.id))) deleteRemoteItem(remoteId, item.id).catch(error => Alert.alert('পণ্য মোছা যায়নি', error instanceof Error ? error.message : 'অনুমতি বা ইন্টারনেট পরীক্ষা করুন।'));
+      for (const item of previous) if (!nextById.has(String(item.id))) deleteRemoteItem(remoteId, item, user).then(result => {
+        if (result.queued) Alert.alert('মোছার অনুরোধ ডিভাইসে রাখা হয়েছে', 'ইন্টারনেট ফিরে এলে সিঙ্ক হবে; conflict হলে তালিকায় জানানো হবে।');
+      }).catch(error => { if (!(error && typeof error === 'object' && 'conflict' in error)) Alert.alert('পণ্য মোছা যায়নি', error instanceof Error ? error.message : 'অনুমতি বা ইন্টারনেট পরীক্ষা করুন।'); });
       return;
     }
+    if (!dataReady) return;
     setLists(current => {
       const existing = current[listId] || list;
       const items = update(existing.items);
@@ -101,13 +181,31 @@ export default function ShoppingListScreen() {
   };
   const updateTitle = (title: string) => {
     if (remoteId) {
-      if (canEditStructure) updateRemoteListTitle(remoteId, title).catch(error => Alert.alert('শিরোনাম সংরক্ষণ হয়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।'));
+      if (canEditStructure && user && remoteList) {
+        const baseRevision = Number((remoteList as RemoteList & { revision?: number }).revision || 0);
+        const baseTitle = remoteList.title;
+        setRemoteList(current => current ? { ...current, title, localSyncState: 'pending' } : current);
+        const write = updateRemoteListTitle(remoteId, user.uid, title, baseRevision, baseTitle);
+        pendingTitleWrites.current = Promise.all([pendingTitleWrites.current.catch(() => {}), write]).then(() => undefined);
+        void write.catch(error => Alert.alert('শিরোনাম ডিভাইসে রাখা যায়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।'));
+      }
       return;
     }
+    if (!dataReady) return;
     setLists(current => {
       const existing = current[listId] || list;
       return { ...current, [listId]: { ...existing, title, createdAt: existing.createdAt || (title.trim() || existing.items.length ? new Date().toISOString() : undefined) } };
     });
+  };
+
+  const syncRemoteTitle = () => {
+    if (!remoteId || !user) return;
+    void pendingTitleWrites.current.then(() => flushPendingCloudChanges(user)).then(async () => {
+      const titleEntry = (await getPendingCloudChanges(user.uid)).find(entry => entry.kind === 'list-title' && entry.resourceId === remoteId);
+      if (titleEntry && (titleEntry.status === 'conflict' || titleEntry.status === 'blocked')) {
+        setRemoteList(current => current ? { ...current, localSyncState: titleEntry.status, localOutboxId: titleEntry.id, localRemoteValue: titleEntry.remoteValue, localRemoteRevision: titleEntry.remoteRevision } : current);
+      }
+    }).catch(error => Alert.alert('শিরোনাম সিঙ্ক হয়নি', error instanceof Error ? error.message : 'আপনার লেখা ডিভাইসে রাখা আছে; পরে আবার চেষ্টা করুন।'));
   };
 
   const beginPurchase = (item: Item) => {
@@ -138,7 +236,7 @@ export default function ShoppingListScreen() {
     setEditQty(item.qty);
   };
   const openAddItem = useCallback(() => {
-    if (!loaded) return;
+    if (!dataReady) return;
     if (!canEditStructure) {
       Alert.alert('Edit Permission দরকার', 'নতুন পণ্য যোগ করতে তালিকার মালিকের কাছ থেকে Edit Permission নিন।');
       return;
@@ -147,13 +245,13 @@ export default function ShoppingListScreen() {
     setEditItem(null);
     setEditName('');
     setEditQty('১টি');
-  }, [canEditStructure, loaded]);
+  }, [canEditStructure, dataReady]);
   useEffect(() => {
-    if (loaded && params.startAdd === '1' && !didAutoOpenAdd.current) {
+    if (dataReady && params.startAdd === '1' && !didAutoOpenAdd.current) {
       didAutoOpenAdd.current = true;
       openAddItem();
     }
-  }, [loaded, openAddItem, params.startAdd]);
+  }, [dataReady, openAddItem, params.startAdd]);
   const saveEdit = () => {
     if (!canEditStructure || !editName.trim()) return;
     if (addingItem) {
@@ -175,27 +273,6 @@ export default function ShoppingListScreen() {
     setAddingItem(false);
     setEditItem(null);
   };
-  const printList = async () => {
-    const printableItems = list.items.filter(item => item.status !== 'omitted');
-    if (!printableItems.length) {
-      Alert.alert('তালিকা খালি', 'প্রিন্ট করার আগে বাজারের জিনিস যোগ করুন।');
-      return;
-    }
-    const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
-    const date = list.createdAt ? new Date(list.createdAt) : new Date();
-    const rows = printableItems.map((item, index) => {
-      const purchased = item.status === 'purchased';
-      const price = typeof item.price === 'number' ? `৳${bn(item.price)}` : '—';
-      return `<tr><td class="number">${bn(index + 1)}</td><td>${escapeHtml(item.name)}</td><td class="quantity">${escapeHtml(item.qty || '—')}</td><td class="status"><span class="check ${purchased ? 'checked' : ''}">${purchased ? '✓' : ''}</span> ${purchased ? 'কেনা হয়েছে' : 'বাকি'}</td><td class="price">${price}</td></tr>`;
-    }).join('');
-    const html = `<!doctype html><html lang="bn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(list.title || 'বাজারের তালিকা')}</title><style>
-      @page{size:A4 portrait;margin:14mm}*{box-sizing:border-box}body{font-family:"Noto Sans Bengali","Nirmala UI",Arial,sans-serif;color:#17231f;margin:0;font-size:11pt}.sheet{width:100%}.brand{font-size:9pt;letter-spacing:.08em;color:#167455;font-weight:700;text-transform:uppercase;margin-bottom:5mm}.heading{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #167455;padding-bottom:5mm;margin-bottom:6mm}.title{font-size:22pt;font-weight:700;margin:0 0 2mm}.subtitle{font-size:9pt;color:#69756f}.meta{text-align:right;font-size:9pt;color:#58655f;line-height:1.7}.summary{display:flex;justify-content:space-between;padding:3mm 4mm;background:#f0f6f3;border:1px solid #d5e3dc;border-radius:2mm;margin-bottom:5mm;font-size:9pt}.summary strong{color:#145a40}.table{width:100%;border-collapse:collapse;table-layout:fixed}.table th{background:#e8f1ec;color:#29483b;font-size:9pt;text-align:left;padding:3mm 2.5mm;border:1px solid #cbd9d1}.table td{padding:3mm 2.5mm;border:1px solid #d8e0dc;vertical-align:middle;height:12mm}.number{width:10mm;text-align:center;color:#68766e}.quantity{width:28mm}.status{width:37mm;font-size:9pt}.price{width:25mm;text-align:right}.check{display:inline-flex;border:1px solid #8b9d92;width:4mm;height:4mm;line-height:3mm;text-align:center;align-items:center;justify-content:center;font-weight:bold}.checked{border-color:#167455;color:#167455}.footer{margin-top:7mm;padding-top:3mm;border-top:1px solid #d8e0dc;display:flex;justify-content:space-between;color:#69756f;font-size:8pt}.emptyline{color:#839087}.totalrow{font-weight:700;background:#f7faf8}.totalrow td{border-top:2px solid #a8bcb0}.keep{break-inside:avoid} </style></head><body><main class="sheet"><div class="brand">আমার খাতা · বাজারের তালিকা</div><header class="heading"><div><h1 class="title">${escapeHtml(list.title || 'বাজারের তালিকা')}</h1><div class="subtitle">পরিকল্পিত বাজার · পণ্য ও খরচের হিসাব</div></div><div class="meta">তালিকার তারিখ<br><strong>${escapeHtml(date.toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' }))}</strong><br>${escapeHtml(date.toLocaleTimeString('bn-BD', { hour: 'numeric', minute: '2-digit' }))}</div></header><div class="summary"><span>মোট পণ্য: <strong>${bn(printableItems.length)}টি</strong></span><span>কেনা হয়েছে: <strong>${bn(printableItems.filter(item => item.status === 'purchased').length)}টি</strong></span></div><table class="table"><thead><tr><th class="number">নং</th><th>পণ্যের নাম</th><th class="quantity">পরিমাণ</th><th class="status">অবস্থা</th><th class="price">দাম</th></tr></thead><tbody>${rows}<tr class="totalrow"><td colspan="4" style="text-align:right">কেনা পণ্যের মোট দাম</td><td class="price">৳${bn(total)}</td></tr></tbody></table><footer class="footer"><span>তালিকার আইটেম: ${bn(printableItems.length)}টি</span><span>প্রিন্টের সময়: ${escapeHtml(new Date().toLocaleString('bn-BD'))}</span></footer></main></body></html>`;
-    try {
-      await Print.printAsync({ html });
-    } catch (error) {
-      Alert.alert('প্রিন্ট প্রিভিউ খোলা যায়নি', error instanceof Error ? error.message : 'আবার চেষ্টা করুন।');
-    }
-  };
   const omitItem = (item: Item) => {
     setMenuItem(null);
     updateItems(items => items.map(value => value.id === item.id ? { ...value, status: 'omitted' } : value));
@@ -210,16 +287,18 @@ export default function ShoppingListScreen() {
   };
 
   return <SafeAreaView style={s.page} edges={['top', 'right', 'bottom', 'left']}>
-    <StatusBar style="light" />
+    <StatusBar style={theme === 'dark' ? 'light' : 'dark'} />
     <View style={s.header}>
-      <Pressable onPress={() => router.back()} style={s.backButton} accessibilityLabel="পেছনে যান"><Text style={s.back}>‹</Text></Pressable>
+      <Pressable onPress={() => goBackOrReplace(router, remoteId ? '/shared' : '/lists')} hitSlop={10} accessibilityRole="button" accessibilityLabel="পেছনে যান" style={s.backButton}><ThemedIcon role="primary" style={s.back}>‹</ThemedIcon></Pressable>
       <View style={s.headerIcon} accessibilityLabel="তালিকা"><ShoppingCartIcon size={32} /></View>
-      <View style={s.headerCopy}><Text numberOfLines={1} ellipsizeMode="tail" style={s.headerTitle}>তালিকা</Text><TextInput value={list.title} onChangeText={updateTitle} editable={loaded && canEditStructure} numberOfLines={1} placeholder="তালিকার শিরোনাম লিখুন" placeholderTextColor="#78848e" style={s.headerTitleInput} returnKeyType="done" /><Text style={s.headerDate}>{list.title.trim() && list.createdAt ? `${new Date(list.createdAt).toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })} · ${new Date(list.createdAt).toLocaleTimeString('bn-BD', { hour: 'numeric', minute: '2-digit' })}` : 'শিরোনাম দিলে তারিখ ও সময় যোগ হবে'}</Text></View>
+      <View style={s.headerCopy}><Text numberOfLines={1} ellipsizeMode="tail" style={s.headerTitle}>তালিকা</Text><TextInput value={list.title} onChangeText={updateTitle} onEndEditing={syncRemoteTitle} editable={dataReady && canEditStructure} numberOfLines={1} placeholder="তালিকার শিরোনাম লিখুন" placeholderTextColor="#78848e" style={s.headerTitleInput} returnKeyType="done" /><Text style={s.headerDate}>{list.title.trim() && list.createdAt ? `${new Date(list.createdAt).toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })} · ${new Date(list.createdAt).toLocaleTimeString('bn-BD', { hour: 'numeric', minute: '2-digit' })}` : 'শিরোনাম দিলে তারিখ ও সময় যোগ হবে'}</Text></View>
     </View>
 
-    <View style={s.summaryRow}><View style={s.totalSummary}><View style={s.totalInfo}><Text style={s.totalLabel}>মোট</Text><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={s.totalValue}>৳{bn(total)}</Text></View></View><Pressable onPress={printList} style={s.summaryPrintButton} accessibilityRole="button" accessibilityLabel="এই বাজারের তালিকা প্রিন্ট করুন" hitSlop={6}><Image source={require('../../assets/printer.png')} resizeMode="contain" style={s.summaryIconImage} accessible={false} /></Pressable><Pressable onPress={() => setShareOpen(true)} style={s.summaryShareButton} accessibilityRole="button" accessibilityLabel="এই বাজারের তালিকা শেয়ার করুন" hitSlop={6}><Image source={require('../../assets/send.png')} resizeMode="contain" style={s.summaryIconImage} accessible={false} /></Pressable></View>
+    <View style={s.summaryRow}><View style={s.totalSummary}><View style={s.totalInfo}><Text style={s.totalLabel}>মোট</Text><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={s.totalValue}>৳{bn(total)}</Text></View></View><Pressable onPress={() => setPdfCenterOpen(true)} disabled={!dataReady} style={[s.summaryPrintButton, theme === 'light' && s.summaryActionLight]} accessibilityRole="button" accessibilityLabel="PDF Center খুলুন" hitSlop={6}><Image source={require('../../assets/printer.png')} resizeMode="contain" style={[s.summaryIconImage, theme === 'light' && s.summaryIconLight]} accessible={false} /></Pressable><Pressable disabled={!dataReady} onPress={() => setShareOpen(true)} style={[s.summaryShareButton, theme === 'light' && s.summaryActionLight]} accessibilityRole="button" accessibilityLabel="এই বাজারের তালিকা শেয়ার করুন" hitSlop={6}><Image source={require('../../assets/send.png')} resizeMode="contain" style={[s.summaryIconImage, theme === 'light' && s.summaryIconLight]} accessible={false} /></Pressable></View>
+    {remoteId && remoteList?.cached && <Text style={s.syncNotice}>{remoteList.items.some(item => Boolean((item as typeof item & { localSyncState?: string }).localSyncState)) || remoteList.localSyncState ? 'অফলাইন কপি · কিছু পরিবর্তন সিঙ্কের অপেক্ষায়' : 'অফলাইন কপি · সর্বশেষ দেখা তালিকা'}</Text>}
+    {remoteId && remoteList && !remoteList.cached && remoteList.localSyncState && <Text style={s.syncNotice}>{remoteList.localSyncState === 'conflict' ? 'শিরোনামে পরিবর্তন-সংঘাত · আপনার লেখা ডিভাইসে রাখা আছে' : remoteList.localSyncState === 'blocked' ? 'শিরোনাম সিঙ্ক হয়নি · আবার চেষ্টা প্রয়োজন' : 'শিরোনাম সিঙ্কের অপেক্ষায়'}</Text>}
     <ScrollView style={s.listScroll} keyboardShouldPersistTaps="handled" contentContainerStyle={s.items} showsVerticalScrollIndicator={false}>
-      {remoteId && !loaded ? <ActivityIndicator style={{ marginTop: 35 }} color="#2b8655" /> : list.items.length ? list.items.map(item => <ItemRow
+      {remoteId && !dataReady ? <ActivityIndicator style={{ marginTop: 35 }} color="#2b8655" /> : list.items.length ? list.items.map(item => <ItemRow
         key={item.id}
         item={item}
         onToggle={() => item.status === 'purchased' ? restoreItem(item) : item.status === 'omitted' ? restoreItem(item) : beginPurchase(item)}
@@ -231,13 +310,13 @@ export default function ShoppingListScreen() {
       />) : <View style={s.empty}><Text style={s.emptyTitle}>তালিকাটি এখনো খালি</Text><Text style={s.emptyText}>নিচের + চিহ্নে চাপ দিয়ে জিনিস যোগ করুন।</Text></View>}
     </ScrollView>
 
-    <Pressable disabled={!loaded} onPress={openAddItem} style={[s.addFab, !loaded && s.addFabDisabled]} accessibilityRole="button" accessibilityLabel="বাজারের নতুন পণ্য যোগ করুন" hitSlop={10}><Text style={s.addFabGlyph}>＋</Text></Pressable>
+    <Pressable disabled={!dataReady} onPress={openAddItem} style={[s.addFab, !dataReady && s.addFabDisabled]} accessibilityRole="button" accessibilityLabel="বাজারের নতুন পণ্য যোগ করুন" hitSlop={10}><ThemedIcon role="inverse" style={s.addFabGlyph}>＋</ThemedIcon></Pressable>
 
     <Modal visible={!!priceItem} transparent animationType="slide" onRequestClose={() => setPriceItem(null)}>
       <KeyboardAvoidingView style={s.modalKeyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <Pressable style={s.scrim} onPress={() => setPriceItem(null)}>
         <Pressable style={s.sheet} onPress={event => event.stopPropagation()}><ScrollView style={s.sheetScroll} contentContainerStyle={s.sheetScrollContent} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
-          <View style={s.grabber} /><View style={s.sheetHeading}><View><Text style={s.sheetEyebrow}>কেনা সম্পন্ন</Text><Text style={s.sheetTitle}>{priceItem?.name}</Text></View><Pressable onPress={() => setPriceItem(null)} style={s.sheetClose}><Text style={s.sheetCloseText}>×</Text></Pressable></View>
+          <View style={s.grabber} /><View style={s.sheetHeading}><View><Text style={s.sheetEyebrow}>কেনা সম্পন্ন</Text><Text style={s.sheetTitle}>{priceItem?.name}</Text></View><Pressable onPress={() => setPriceItem(null)} style={s.sheetClose}><ThemedIcon role="secondary" style={s.sheetCloseText}>×</ThemedIcon></Pressable></View>
           <Text style={s.fieldLabel}>দাম (টাকা)</Text>
           <View style={s.moneyField}><Text style={s.currency}>৳</Text><TextInput autoFocus keyboardType="decimal-pad" value={priceText} onChangeText={updatePrice} placeholder="দাম লিখুন" placeholderTextColor="#75818c" style={s.moneyInput} /></View>
           <Text style={s.autoSave}>দাম লেখার সঙ্গে সঙ্গে সংরক্ষিত হবে</Text>
@@ -269,6 +348,7 @@ export default function ShoppingListScreen() {
       </Pressable></Pressable>
     </Modal>
     <ShareDialog visible={shareOpen} onClose={() => setShareOpen(false)} kind="list" localId={listId} resourceId={remoteId || list.cloudId} list={list} keyboardAvoiding onLinked={setActiveRemoteId} onDeleted={() => { setActiveRemoteId(''); setRemoteList(null); router.replace('/'); }} />
+    <PdfCenterModal visible={pdfCenterOpen} onClose={() => setPdfCenterOpen(false)} list={list} total={total} />
   </SafeAreaView>;
 }
 
@@ -280,7 +360,7 @@ function ItemRow({ item, onToggle, onPrice, onEdit, onMore, onOmit, canEditStruc
   return <View style={[s.row, (purchased || omitted) && s.rowEmphasis]}>
     <Pressable onPress={onToggle} accessibilityRole="button" accessibilityLabel={`${item.name}: ${labels[item.status]}`} style={s.statusButton}>
       <View style={[s.statusCircle, purchased && s.statusPurchased, omitted && s.statusOmitted]}>
-        <Text style={[s.statusMark, omitted && s.omittedMark]}>{purchased ? '✓' : omitted ? '╱' : ''}</Text>
+        {purchased ? <Text style={s.statusMark}>✓</Text> : omitted ? <ThemedIcon role="destructive" style={[s.statusMark, s.omittedMark]}>╱</ThemedIcon> : <Text style={s.statusMark} />}
       </View>
     </Pressable>
     <Pressable onPress={onEdit} style={s.itemCopy} accessibilityRole="button" accessibilityLabel={`${item.name} সম্পাদনা করুন`}>
@@ -290,17 +370,17 @@ function ItemRow({ item, onToggle, onPrice, onEdit, onMore, onOmit, canEditStruc
     </Pressable>
     {purchased ? <View style={s.purchasedActions}>
       <Text style={[s.itemPrice, typeof item.price !== 'number' && s.itemPriceEmpty]}>{typeof item.price === 'number' ? `৳${bn(item.price)}` : 'দাম'}</Text>
-      <Pressable onPress={onPrice} style={s.actionButton} accessibilityLabel={`${item.name} দাম সম্পাদনা করুন`}><Text style={s.editGlyph}>✎</Text></Pressable>
-      {canEditStructure && <Pressable onPress={onMore} style={s.actionButton} accessibilityLabel={`${item.name} এর আরও অপশন`}><Text style={s.moreGlyph}>⋮</Text></Pressable>}
-    </View> : omitted ? (canEditStructure ? <Pressable onPress={onMore} style={s.actionButton} accessibilityLabel={`${item.name} এর আরও অপশন`}><Text style={s.moreGlyph}>⋮</Text></Pressable> : <View style={s.actionButton} />) : <View style={s.pendingActions}>
-      <Pressable onPress={onPrice} style={s.pricePrompt} accessibilityLabel={`${item.name} কেনা সম্পন্ন করে দাম যোগ করুন`}><Text style={s.pricePromptText}>দাম</Text><Text style={s.plusGlyph}>＋</Text></Pressable>
-      {canEditStructure && <><Pressable onPress={onOmit} style={s.omitButton} accessibilityLabel={`${item.name} তালিকা থেকে বাদ দিন`}><Text style={s.omitGlyph}>×</Text></Pressable><Pressable onPress={onMore} style={s.actionButton} accessibilityLabel={`${item.name} এর আরও অপশন`}><Text style={s.moreGlyph}>⋮</Text></Pressable></>}
+      <Pressable onPress={onPrice} style={s.actionButton} accessibilityLabel={`${item.name} দাম সম্পাদনা করুন`}><ThemedIcon role="secondary" style={s.editGlyph}>✎</ThemedIcon></Pressable>
+      {canEditStructure && <Pressable onPress={onMore} style={s.actionButton} accessibilityLabel={`${item.name} এর আরও অপশন`}><ThemedIcon role="secondary" style={s.moreGlyph}>⋮</ThemedIcon></Pressable>}
+    </View> : omitted ? (canEditStructure ? <Pressable onPress={onMore} style={s.actionButton} accessibilityLabel={`${item.name} এর আরও অপশন`}><ThemedIcon role="secondary" style={s.moreGlyph}>⋮</ThemedIcon></Pressable> : <View style={s.actionButton} />) : <View style={s.pendingActions}>
+      <Pressable onPress={onPrice} style={s.pricePrompt} accessibilityLabel={`${item.name} কেনা সম্পন্ন করে দাম যোগ করুন`}><Text style={s.pricePromptText}>দাম</Text><ThemedIcon role="secondary" style={s.plusGlyph}>＋</ThemedIcon></Pressable>
+      {canEditStructure && <><Pressable onPress={onOmit} style={s.omitButton} accessibilityLabel={`${item.name} তালিকা থেকে বাদ দিন`}><ThemedIcon role="destructive" style={s.omitGlyph}>×</ThemedIcon></Pressable><Pressable onPress={onMore} style={s.actionButton} accessibilityLabel={`${item.name} এর আরও অপশন`}><ThemedIcon role="secondary" style={s.moreGlyph}>⋮</ThemedIcon></Pressable></>}
     </View>}
   </View>;
 }
 
 function MenuAction({ label, onPress, destructive = false }: { label: string; onPress: () => void; destructive?: boolean }) {
-  return <Pressable style={s.menuAction} onPress={onPress}><Text style={[s.menuActionText, destructive && s.destructiveText]}>{label}</Text><Text style={s.menuChevron}>›</Text></Pressable>;
+  return <Pressable style={s.menuAction} onPress={onPress}><Text style={[s.menuActionText, destructive && s.destructiveText]}>{label}</Text><ThemedIcon role={destructive ? 'destructive' : 'secondary'} style={s.menuChevron}>›</ThemedIcon></Pressable>;
 }
 
 const s = StyleSheet.create({
@@ -308,7 +388,7 @@ const s = StyleSheet.create({
   header: { minHeight: 106, paddingHorizontal: 16, paddingVertical: 15, flexDirection: 'row', alignItems: 'center', gap: 11, borderBottomWidth: 1, borderBottomColor: '#101820' },
   backButton: { width: 30, height: 44, alignItems: 'center', justifyContent: 'center' }, back: { color: '#a7b4be', fontSize: 34, lineHeight: 39 },
   headerIcon: { width: 56, height: 56, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: '#105b49', borderWidth: 1, borderColor: '#278d70' }, headerCopy: { flex: 1, minWidth: 0 }, headerTitle: { color: '#f2f5f6', fontSize: 22, fontWeight: '600' }, headerTitleInput: { color: '#d3dce1', fontSize: 14, fontWeight: '500', marginTop: 1, padding: 0, height: 23 }, headerDate: { color: '#78848e', fontSize: 10, marginTop: 2 }, totalLabel: { color: '#93a0a8', fontSize: 12 }, totalValue: { color: '#bdebd9', fontSize: 18, fontWeight: '700', flexShrink: 1 },
-  summaryRow: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 15, marginTop: 11, marginBottom: 5 }, totalSummary: { flex: 1, minWidth: 0, minHeight: 58, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', borderRadius: 15, borderWidth: 1, borderColor: '#1b3931', backgroundColor: '#0c1917' }, totalInfo: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 10 }, summaryShareButton: { width: 52, height: 58, marginLeft: 7, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#17372d', borderWidth: 1, borderColor: '#255442' }, summaryPrintButton: { width: 52, height: 58, marginLeft: 7, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#17372d', borderWidth: 1, borderColor: '#255442' }, summaryIconImage: { width: 31, height: 31, tintColor: '#4bc28b' }, addActions: { flexDirection: 'row', gap: 10, marginTop: 18 }, addAnother: { flex: 1, marginTop: 0 }, addFinish: { height: 49, minWidth: 78, paddingHorizontal: 14, borderRadius: 13, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#40524b', backgroundColor: '#1a2824' }, addFinishText: { color: '#d6e2dc', fontSize: 15, fontWeight: '600' }, listScroll: { flex: 1 },
+  summaryRow: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 15, marginTop: 11, marginBottom: 5 }, syncNotice: { marginHorizontal: 18, marginBottom: 5, color: '#e9c78d', fontSize: 11 }, totalSummary: { flex: 1, minWidth: 0, minHeight: 58, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', borderRadius: 15, borderWidth: 1, borderColor: '#1b3931', backgroundColor: '#0c1917' }, totalInfo: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 10 }, summaryShareButton: { width: 52, height: 58, marginLeft: 7, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#17372d', borderWidth: 1, borderColor: '#255442' }, summaryPrintButton: { width: 52, height: 58, marginLeft: 7, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#17372d', borderWidth: 1, borderColor: '#255442' }, summaryIconImage: { width: 31, height: 31, tintColor: '#4bc28b' }, summaryIconLight: { tintColor: '#fff' }, summaryActionLight: { backgroundColor: '#187a52', borderColor: '#a9d8bf' }, addActions: { flexDirection: 'row', gap: 10, marginTop: 18 }, addAnother: { flex: 1, marginTop: 0 }, addFinish: { height: 49, minWidth: 78, paddingHorizontal: 14, borderRadius: 13, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#40524b', backgroundColor: '#1a2824' }, addFinishText: { color: '#d6e2dc', fontSize: 15, fontWeight: '600' }, listScroll: { flex: 1 },
   items: { paddingBottom: 100 }, row: { minHeight: 101, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 13, backgroundColor: '#030507', borderBottomWidth: 1, borderBottomColor: '#0a0e12' }, rowEmphasis: { backgroundColor: '#0c141c' }, statusButton: { width: 48, height: 58, alignItems: 'center', justifyContent: 'center' }, statusCircle: { width: 38, height: 38, borderRadius: 19, borderWidth: 2.5, borderColor: '#42c6a0', alignItems: 'center', justifyContent: 'center' }, statusPurchased: { borderColor: '#00a77b', backgroundColor: '#00a77b' }, statusOmitted: { borderWidth: 0, backgroundColor: '#f21820' }, statusMark: { color: '#fff', fontSize: 24, fontWeight: '700', lineHeight: 27 }, omittedMark: { fontSize: 30, fontWeight: '400', transform: [{ rotate: '45deg' }] }, itemCopy: { flex: 1, minWidth: 0, paddingVertical: 13 }, nameLine: { flexDirection: 'row', alignItems: 'center', gap: 7 }, itemName: { flexShrink: 1, color: '#f3f5f6', fontSize: 20, fontWeight: '500' }, itemOmitted: { color: '#737a80', textDecorationLine: 'line-through' }, newBadge: { color: '#70d7b1', backgroundColor: '#153d32', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2, fontSize: 10, overflow: 'hidden' }, itemQty: { color: '#737e87', fontSize: 14, marginTop: 3 }, itemStatus: { display: 'none' },
   purchasedActions: { minWidth: 109, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3 }, itemPrice: { color: '#eef2f4', fontSize: 17, minWidth: 34, textAlign: 'right' }, itemPriceEmpty: { color: '#aeb8bf' }, actionButton: { width: 34, height: 48, alignItems: 'center', justifyContent: 'center' }, editGlyph: { color: '#d9e2e7', fontSize: 23 }, moreGlyph: { color: '#eef1f3', fontSize: 25, lineHeight: 28 }, pendingActions: { minWidth: 136, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' }, pricePrompt: { minWidth: 72, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, pricePromptText: { color: '#e2e8eb', fontSize: 17 }, plusGlyph: { color: '#aab5bd', fontSize: 22, paddingHorizontal: 3 }, omitButton: { width: 30, height: 44, alignItems: 'center', justifyContent: 'center' }, omitGlyph: { color: '#f21d2a', fontSize: 26, lineHeight: 28 },
   empty: { alignItems: 'center', paddingTop: 90, paddingHorizontal: 24 }, emptyTitle: { color: '#e8edf0', fontSize: 19, fontWeight: '600' }, emptyText: { color: '#82909a', fontSize: 13, marginTop: 7, textAlign: 'center' },

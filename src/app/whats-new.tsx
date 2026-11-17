@@ -1,9 +1,10 @@
 import { useRouter } from 'expo-router';
 import React from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { StyleSheet } from 'react-native';
+import { ThemedScrollView as ScrollView, ThemedText as Text, ThemedView as View, ThemedSafeAreaView as SafeAreaView, ThemedIcon } from '../components/ThemePrimitives';
 import { GlossyPressable as Pressable } from '../components/GlossyPressable';
 import { useAppUpdate } from '../contexts/AppUpdateContext';
+import { goBackOrReplace } from '../lib/navigation.mjs';
 
 const LOCAL_NOTES = [
   'বাংলা বাজারের তালিকা ও নোট এক জায়গায় দেখা যায়।',
@@ -16,7 +17,7 @@ export default function WhatsNewScreen() {
   const { currentVersion, latestVersion, manifest } = useAppUpdate();
   const notes = manifest?.changelog.length ? manifest.changelog : LOCAL_NOTES;
   return <SafeAreaView style={s.page} edges={['top']}>
-    <View style={s.header}><Pressable onPress={() => router.back()} style={s.back}><Text style={s.backText}>‹</Text></Pressable><Text style={s.headerTitle}>{"What's New"}</Text><View style={s.spacer} /></View>
+    <View style={s.header}><Pressable onPress={() => goBackOrReplace(router, '/settings')} hitSlop={10} accessibilityRole="button" accessibilityLabel="সেটিংসে ফিরে যান" style={s.back}><ThemedIcon role="primary" style={s.backText}>‹</ThemedIcon></Pressable><Text style={s.headerTitle}>{"What's New"}</Text><View style={s.spacer} /></View>
     <ScrollView contentContainerStyle={s.content}>
       <Text style={s.label}>বর্তমান ভার্সন</Text><Text style={s.version}>{currentVersion}</Text>
       <Text style={s.label}>সর্বশেষ ভার্সন</Text><Text style={s.version}>{latestVersion}</Text>

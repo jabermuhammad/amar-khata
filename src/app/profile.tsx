@@ -1,23 +1,25 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Image, Modal, PanResponder, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Alert, Image, Modal, PanResponder, StyleSheet, useWindowDimensions } from 'react-native';
+import { ThemedScrollView as ScrollView, ThemedText as Text, ThemedView as View, ThemedSafeAreaView as SafeAreaView, ThemedIcon } from '../components/ThemePrimitives';
 import { StatusBar } from 'expo-status-bar';
-import { STORE } from '../data';
 import { useAuth } from '../contexts/AuthContext';
-import { auth } from '../lib/firebase';
-import { signOut } from 'firebase/auth';
+import { readPhoto, writePhoto } from '../lib/localStorage';
 import { GlossyPressable as Pressable } from '../components/GlossyPressable';
+import { useTheme } from '../contexts/ThemeContext';
+import { goBackOrReplace } from '../lib/navigation.mjs';
 
 export default function ProfileScreen() {
+  const { theme } = useTheme();
   const router = useRouter();
-  const { user, configured } = useAuth();
+  const { user, configured, scope, mode } = useAuth();
   const { width, height } = useWindowDimensions();
   const stage = Math.max(220, Math.min(width - 40, height * 0.48, 420));
-  const [photo, setPhoto] = useState<string | null>(null);
+  const [photoState, setPhotoState] = useState<{ scopeKey: string; value: string | null } | null>(null);
+  const scopeKey = scope ? scope.kind === 'guest' ? `guest:${scope.id}` : `user:${scope.uid}` : null;
+  const photo = photoState?.scopeKey === scopeKey ? photoState.value : null;
   const [menu, setMenu] = useState(false);
   const [viewer, setViewer] = useState(false);
   const [source, setSource] = useState<string | null>(null);
@@ -31,8 +33,8 @@ export default function ProfileScreen() {
   useEffect(() => { offsetRef.current = offset; }, [offset]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
-  React.useEffect(() => { AsyncStorage.getItem(STORE.photo).then(value => setPhoto(value || null)).catch(() => {}); }, []);
-  const commitPhoto = (uri: string | null) => { setPhoto(uri); AsyncStorage.setItem(STORE.photo, uri ?? '').catch(() => Alert.alert('ছবি সংরক্ষণ হয়নি', 'আবার চেষ্টা করুন।')); };
+  React.useEffect(() => { let active = true; if (scope && scopeKey) readPhoto(scope).then(value => { if (active) setPhotoState({ scopeKey, value }); }).catch(() => {}); return () => { active = false; }; }, [scope, scopeKey]);
+  const commitPhoto = (uri: string | null) => { if (scopeKey) setPhotoState({ scopeKey, value: uri }); if (scope) writePhoto(scope, uri).catch(() => Alert.alert('ছবি সংরক্ষণ হয়নি', 'আবার চেষ্টা করুন।')); };
 
   const choose = async (camera = false) => {
     setMenu(false);
@@ -89,17 +91,17 @@ export default function ProfileScreen() {
   };
 
   return <SafeAreaView style={s.page} edges={['top', 'left', 'right']}>
-    <StatusBar style={source || viewer ? 'light' : 'dark'} />
-    <View style={s.header}><Pressable onPress={() => router.back()} style={s.back}><Text style={s.backText}>‹</Text></Pressable><Text style={s.headerTitle}>প্রোফাইল</Text><View style={{ width: 40 }} /></View>
+    <StatusBar style={source || viewer || theme === 'dark' ? 'light' : 'dark'} />
+    <View style={s.header}><Pressable onPress={() => goBackOrReplace(router, '/')} hitSlop={10} accessibilityRole="button" accessibilityLabel="হোমে ফিরে যান" style={s.back}><ThemedIcon role="primary" style={s.backText}>‹</ThemedIcon></Pressable><Text style={s.headerTitle}>প্রোফাইল</Text><View style={{ width: 40 }} /></View>
     <ScrollView contentContainerStyle={s.profile} keyboardShouldPersistTaps="handled">
       <Text style={s.muted}>আপনার অ্যাকাউন্ট</Text>
       <Pressable style={s.avatar} onPress={() => setMenu(true)} accessibilityRole="button" accessibilityLabel="প্রোফাইল ছবি দেখুন বা পরিবর্তন করুন">
         {photo ? <Image source={{ uri: photo }} style={s.avatarImage} /> : <Text style={s.avatarPlaceholder}>👤</Text>}
-        <View style={s.cameraBadge}><Text style={s.cameraText}>📷</Text></View>
+        <View style={s.cameraBadge}><ThemedIcon role="primary" style={s.cameraText}>📷</ThemedIcon></View>
       </Pressable>
       <Text style={s.name}>আমার প্রোফাইল</Text><Text style={s.hint}>ছবিতে ট্যাপ করে ছবি দেখুন বা আপলোড করুন</Text>
-      <Pressable style={s.change} onPress={() => setMenu(true)}><Text style={s.changeText}>▧  প্রোফাইল ছবি পরিবর্তন</Text></Pressable>
-      <View style={s.accountBox}><Text style={s.accountTitle}>অ্যাকাউন্ট</Text><Text style={s.accountDetail}>{user?.email || (configured ? 'সাইন ইন করলে শেয়ার ব্যবহার করতে পারবেন' : 'Cloud sharing-এর জন্য Firebase config বাকি')}</Text><Pressable style={s.accountAction} onPress={() => router.push('/settings')}><Text style={s.accountActionText}>সেটিংস ও অ্যাপ সম্পর্কে</Text></Pressable><Pressable style={s.accountAction} onPress={() => router.push('/shared')}><Text style={s.accountActionText}>শেয়ার করা তালিকা ও নোট</Text></Pressable><Pressable style={s.accountAction} onPress={() => router.push('/invite')}><Text style={s.accountActionText}>Invite code গ্রহণ করুন</Text></Pressable>{user ? <Pressable style={s.accountAction} onPress={() => signOut(auth!)}><Text style={s.accountActionText}>সাইন আউট</Text></Pressable> : <Pressable style={s.accountAction} onPress={() => router.push('/auth')}><Text style={s.accountActionText}>সাইন ইন / অ্যাকাউন্ট তৈরি</Text></Pressable>}</View>
+      <Pressable style={s.change} onPress={() => setMenu(true)}><ThemedIcon role="primary" style={s.changeText}>▧  প্রোফাইল ছবি পরিবর্তন</ThemedIcon></Pressable>
+      <View style={s.accountBox}><Text style={s.accountTitle}>{mode === 'guest' ? 'Guest · শুধু এই ডিভাইসে' : 'অ্যাকাউন্ট'}</Text><Text style={s.accountDetail}>{user?.email || (mode === 'guest' ? 'এই Guest space-এর নোট ও তালিকা শুধু এই ডিভাইসে থাকবে।' : configured ? 'সাইন ইন করলে শেয়ার ব্যবহার করতে পারবেন' : 'Cloud sharing-এর জন্য Firebase config বাকি')}</Text><Pressable style={s.settingsEntry} onPress={() => router.push('/settings')} accessibilityRole="button" accessibilityLabel="সেটিংস খুলুন"><View style={s.settingsIcon}><ThemedIcon role="primary" style={s.settingsIconText}>⚙</ThemedIcon></View><ThemedIcon role="primary" style={s.settingsEntryText}>সেটিংস</ThemedIcon><ThemedIcon role="secondary" style={s.settingsChevron}>›</ThemedIcon></Pressable></View>
     </ScrollView>
 
     <Modal visible={menu} transparent animationType="slide" onRequestClose={() => setMenu(false)}>
@@ -133,11 +135,11 @@ export default function ProfileScreen() {
 }
 
 function Action({ title, detail, icon, onPress }: { title: string; detail: string; icon: string; onPress: () => void }) {
-  return <Pressable style={s.actionRow} onPress={onPress}><View style={s.actionIcon}><Text style={s.actionSymbol}>{icon}</Text></View><View style={{ flex: 1 }}><Text style={s.actionTitle}>{title}</Text><Text style={s.actionDetail}>{detail}</Text></View><Text style={s.chevron}>›</Text></Pressable>;
+  return <Pressable style={s.actionRow} onPress={onPress}><View style={s.actionIcon}><ThemedIcon role="primary" style={s.actionSymbol}>{icon}</ThemedIcon></View><View style={{ flex: 1 }}><Text style={s.actionTitle}>{title}</Text><Text style={s.actionDetail}>{detail}</Text></View><ThemedIcon role="secondary" style={s.chevron}>›</ThemedIcon></Pressable>;
 }
 
 const s = StyleSheet.create({
-  page: { flex: 1, backgroundColor: '#fafaf7' }, header: { height: 58, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderColor: '#e8e9e3' }, back: { width: 40 }, backText: { color: '#315f47', fontSize: 34 }, headerTitle: { color: '#20231f', fontSize: 18, fontWeight: '600' }, profile: { flex: 1, alignItems: 'center', paddingTop: 48, paddingHorizontal: 24 }, muted: { color: '#777d75', fontSize: 13 }, avatar: { width: 136, height: 136, marginTop: 24, marginBottom: 18, borderRadius: 68, backgroundColor: '#e6ede7', borderWidth: 1, borderColor: '#d9e3db', alignItems: 'center', justifyContent: 'center' }, avatarImage: { width: '100%', height: '100%', borderRadius: 68 }, avatarPlaceholder: { fontSize: 48 }, cameraBadge: { position: 'absolute', right: -2, bottom: -2, width: 40, height: 40, borderRadius: 20, borderWidth: 3, borderColor: '#fafaf7', backgroundColor: '#315f47', alignItems: 'center', justifyContent: 'center' }, cameraText: { fontSize: 16 }, name: { color: '#20231f', fontSize: 22, fontWeight: '600' }, hint: { color: '#777d75', fontSize: 13, textAlign: 'center', marginTop: 7, marginBottom: 24 }, change: { minHeight: 48, borderWidth: 1, borderColor: '#dce5dd', borderRadius: 13, backgroundColor: '#fff', paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center' }, changeText: { color: '#315f47', fontSize: 14, fontWeight: '600' }, accountBox: { width: '100%', padding: 15, marginTop: 22, borderRadius: 16, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e6e9e1' }, accountTitle: { color: '#30382f', fontSize: 14, fontWeight: '700' }, accountDetail: { color: '#80877e', fontSize: 11, marginTop: 5 }, accountAction: { minHeight: 40, justifyContent: 'center', borderBottomWidth: 1, borderColor: '#edf0e9' }, accountActionText: { color: '#34774e', fontSize: 13, fontWeight: '600' },
+  page: { flex: 1, backgroundColor: '#fafaf7' }, header: { height: 58, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderColor: '#e8e9e3' }, back: { width: 40 }, backText: { color: '#315f47', fontSize: 34 }, headerTitle: { color: '#20231f', fontSize: 18, fontWeight: '600' }, profile: { flex: 1, alignItems: 'center', paddingTop: 48, paddingHorizontal: 24 }, muted: { color: '#777d75', fontSize: 13 }, avatar: { width: 136, height: 136, marginTop: 24, marginBottom: 18, borderRadius: 68, backgroundColor: '#e6ede7', borderWidth: 1, borderColor: '#d9e3db', alignItems: 'center', justifyContent: 'center' }, avatarImage: { width: '100%', height: '100%', borderRadius: 68 }, avatarPlaceholder: { fontSize: 48 }, cameraBadge: { position: 'absolute', right: -2, bottom: -2, width: 40, height: 40, borderRadius: 20, borderWidth: 3, borderColor: '#fafaf7', backgroundColor: '#315f47', alignItems: 'center', justifyContent: 'center' }, cameraText: { fontSize: 16 }, name: { color: '#20231f', fontSize: 22, fontWeight: '600' }, hint: { color: '#777d75', fontSize: 13, textAlign: 'center', marginTop: 7, marginBottom: 24 }, change: { minHeight: 48, borderWidth: 1, borderColor: '#dce5dd', borderRadius: 13, backgroundColor: '#fff', paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center' }, changeText: { color: '#315f47', fontSize: 14, fontWeight: '600' }, accountBox: { width: '100%', padding: 15, marginTop: 22, borderRadius: 16, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e6e9e1' }, accountTitle: { color: '#30382f', fontSize: 14, fontWeight: '700' }, accountDetail: { color: '#80877e', fontSize: 11, marginTop: 5 }, settingsEntry: { minHeight: 52, marginTop: 10, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', gap: 11, borderBottomWidth: 1, borderColor: '#edf0e9' }, settingsIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: '#e4eee8', alignItems: 'center', justifyContent: 'center' }, settingsIconText: { color: '#276e4b', fontSize: 18 }, settingsEntryText: { flex: 1, color: '#34774e', fontSize: 13, fontWeight: '700' }, settingsChevron: { color: '#92988f', fontSize: 24 }, accountAction: { minHeight: 40, justifyContent: 'center', borderBottomWidth: 1, borderColor: '#edf0e9' }, accountActionText: { color: '#34774e', fontSize: 13, fontWeight: '600' },
   scrim: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(19,24,20,.45)' }, sheet: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24, backgroundColor: '#fbfbf8', borderTopLeftRadius: 24, borderTopRightRadius: 24 }, grabber: { width: 36, height: 4, borderRadius: 3, backgroundColor: '#c7cac4', alignSelf: 'center', marginBottom: 19 }, sheetTitle: { color: '#20231f', fontSize: 20, fontWeight: '600', marginBottom: 12 }, actionRow: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomWidth: 1, borderColor: '#e8e9e4' }, actionIcon: { width: 40, height: 40, borderRadius: 12, backgroundColor: '#e4eee6', alignItems: 'center', justifyContent: 'center' }, actionSymbol: { fontSize: 19, color: '#315f47' }, actionTitle: { color: '#252922', fontSize: 15, fontWeight: '600' }, actionDetail: { color: '#777d75', fontSize: 12, marginTop: 2 }, chevron: { color: '#92988f', fontSize: 25 }, cancel: { height: 48, justifyContent: 'center', alignItems: 'center', marginTop: 8 }, cancelText: { color: '#5f655e', fontSize: 14 },
   viewer: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(8,12,9,.96)' }, viewerImage: { width: '92%', height: '72%', borderRadius: 300 }, close: { position: 'absolute', top: 36, right: 20, zIndex: 2, width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,.15)', alignItems: 'center', justifyContent: 'center' }, closeText: { color: '#fff', fontSize: 30 }, viewerAction: { position: 'absolute', bottom: 34, height: 48, paddingHorizontal: 22, borderRadius: 14, backgroundColor: '#fff', justifyContent: 'center' }, viewerActionText: { color: '#233b2c', fontWeight: '600' },
   cropPage: { flex: 1, backgroundColor: '#171a18' }, cropHeader: { minHeight: 62, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, cropIcon: { width: 38, color: '#fff', fontSize: 30 }, cropHeadText: { flex: 1, alignItems: 'center' }, cropTitle: { color: '#fff', fontSize: 15, fontWeight: '600' }, cropSub: { color: '#b4bbb6', fontSize: 11, marginTop: 2 }, reset: { width: 42, color: '#c6e5ce', textAlign: 'right', fontSize: 13 }, cropBody: { flex: 1, justifyContent: 'center', paddingBottom: 16 }, stage: { alignSelf: 'center', overflow: 'hidden', borderRadius: 12, backgroundColor: '#252a26' }, cropImage: { position: 'absolute', top: 0, left: 0 }, circle: { ...StyleSheet.absoluteFill, borderWidth: 2, borderColor: '#fff', borderRadius: 999 }, zoomRow: { alignSelf: 'center', flexDirection: 'row', justifyContent: 'space-between', marginTop: 28 }, zoomText: { color: '#e6e9e6', fontSize: 13 }, zoomControls: { alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 14, marginTop: 8 }, zoomButton: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#515752', borderRadius: 12 }, zoomButtonText: { color: '#fff', fontSize: 20 }, track: { flex: 1, height: 5, backgroundColor: '#424943', borderRadius: 3, overflow: 'hidden' }, fill: { height: '100%', backgroundColor: '#8ccea0' }, cropFooter: { minHeight: 76, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 12, borderTopWidth: 1, borderColor: '#343936', flexDirection: 'row', gap: 12 }, cropCancel: { flex: 1, height: 50, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#515752', borderRadius: 13 }, cropCancelText: { color: '#fff', fontSize: 14 }, cropSave: { flex: 1.5, height: 50, alignItems: 'center', justifyContent: 'center', borderRadius: 13, backgroundColor: '#4e8b60' }, cropSaveText: { color: '#fff', fontSize: 14, fontWeight: '600' },

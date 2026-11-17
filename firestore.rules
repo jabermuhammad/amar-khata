@@ -56,6 +56,82 @@ service cloud.firestore {
         && ref.resourceId == resourceId
         && ref.permission == permission;
     }
+    function connectionShareGrant(connectionId, kind, resourceId, memberUid, permission) {
+      let connectionPath = /databases/$(database)/documents/connections/$(connectionId);
+      let sharePath = /databases/$(database)/documents/connections/$(connectionId)/sharedResources/$(kind + '-' + resourceId);
+      let rootPath = kind == 'list'
+        ? /databases/$(database)/documents/shoppingLists/$(resourceId)
+        : /databases/$(database)/documents/notes/$(resourceId);
+      let connection = getAfter(connectionPath).data;
+      let share = getAfter(sharePath).data;
+      return verified()
+        && existsAfter(connectionPath)
+        && connection.status == 'active'
+        && request.auth.uid in connection.memberUids
+        && memberUid in connection.memberUids
+        && memberUid != request.auth.uid
+        && existsAfter(rootPath)
+        && getAfter(rootPath).data.ownerUid == request.auth.uid
+        && (!('deleting' in getAfter(rootPath).data)
+          || getAfter(rootPath).data.deleting != true)
+        && existsAfter(sharePath)
+        && share.kind == kind
+        && share.resourceId == resourceId
+        && share.fromUid == request.auth.uid
+        && share.toUid == memberUid
+        && share.permission == permission;
+    }
+    function canonicalConnectionId(firstUid, secondUid) {
+      let first = firstUid < secondUid ? firstUid : secondUid;
+      let second = firstUid < secondUid ? secondUid : firstUid;
+      return first + '~' + second;
+    }
+    function connectionInviteAccepted(inviteId, connectionId) {
+      let invitePath = /databases/$(database)/documents/connectionInvites/$(inviteId);
+      return existsAfter(invitePath)
+        && getAfter(invitePath).data.status == 'accepted'
+        && getAfter(invitePath).data.connectionId == connectionId
+        && getAfter(invitePath).data.acceptedAt is timestamp
+        && getAfter(invitePath).data.acceptedAt <= request.time
+        && getAfter(invitePath).data.acceptedAt < getAfter(invitePath).data.expiresAt
+        && getAfter(invitePath).data.acceptedBy == request.auth.uid
+        && getAfter(invitePath).data.senderUid in request.resource.data.memberUids
+        && request.auth.uid in request.resource.data.memberUids
+        && (('recipientUid' in getAfter(invitePath).data
+            && getAfter(invitePath).data.recipientUid == request.auth.uid)
+          || ('recipientEmail' in getAfter(invitePath).data
+            && request.auth.token.email is string
+            && getAfter(invitePath).data.recipientEmail == request.auth.token.email.lower()));
+    }
+    function validSharedResourceWrite(connectionId, kind, resourceId) {
+      let connectionPath = /databases/$(database)/documents/connections/$(connectionId);
+      let data = request.resource.data;
+      let rootPath = kind == 'list'
+        ? /databases/$(database)/documents/shoppingLists/$(resourceId)
+        : /databases/$(database)/documents/notes/$(resourceId);
+      return verified()
+        && exists(connectionPath)
+        && get(connectionPath).data.status == 'active'
+        && request.auth.uid in get(connectionPath).data.memberUids
+        && data.toUid in get(connectionPath).data.memberUids
+        && data.toUid != request.auth.uid
+        && data.fromUid == request.auth.uid
+        && data.kind == kind
+        && data.resourceId == resourceId
+        && data.title is string
+        && data.title.size() <= 120
+        && exists(rootPath)
+        && get(rootPath).data.ownerUid == request.auth.uid
+        && (!('deleting' in get(rootPath).data)
+          || get(rootPath).data.deleting != true);
+    }
+    function listTitleRevisionAdvances() {
+      return request.resource.data.revision is int
+        && ((!('revision' in resource.data) && request.resource.data.revision == 1)
+          || ('revision' in resource.data
+            && resource.data.revision is int
+            && request.resource.data.revision == resource.data.revision + 1));
+    }
     function invitedBy(inviteId, kind, resourceId) {
       let invite = getAfter(/databases/$(database)/documents/invites/$(inviteId)).data;
       return verified()
@@ -73,17 +149,21 @@ service cloud.firestore {
           && getAfter(/databases/$(database)/documents/notes/$(resourceId)).data.ownerUid == invite.ownerUid));
     }
     function acceptedInviteHasMembership(inviteId) {
+      let listMemberPath = /databases/$(database)/documents/shoppingLists/$(resource.data.resourceId)/members/$(request.auth.uid);
+      let noteMemberPath = /databases/$(database)/documents/notes/$(resource.data.resourceId)/members/$(request.auth.uid);
       return (resource.data.kind == 'list'
         && listActiveAfter(resource.data.resourceId)
-        && existsAfter(/databases/$(database)/documents/shoppingLists/$(resource.data.resourceId)/members/$(request.auth.uid))
-        && getAfter(/databases/$(database)/documents/shoppingLists/$(resource.data.resourceId)/members/$(request.auth.uid)).data.permission == resource.data.permission
-        && getAfter(/databases/$(database)/documents/shoppingLists/$(resource.data.resourceId)/members/$(request.auth.uid)).data.inviteId == inviteId
+        && existsAfter(listMemberPath)
+        && getAfter(listMemberPath).data.permission == resource.data.permission
+        && 'inviteId' in getAfter(listMemberPath).data
+        && getAfter(listMemberPath).data.inviteId == inviteId
         && resourceRefMatches(request.auth.uid, 'list-' + resource.data.resourceId, 'list', resource.data.resourceId, resource.data.permission))
         || (resource.data.kind == 'note'
         && noteActiveAfter(resource.data.resourceId)
-        && existsAfter(/databases/$(database)/documents/notes/$(resource.data.resourceId)/members/$(request.auth.uid))
-        && getAfter(/databases/$(database)/documents/notes/$(resource.data.resourceId)/members/$(request.auth.uid)).data.permission == resource.data.permission
-        && getAfter(/databases/$(database)/documents/notes/$(resource.data.resourceId)/members/$(request.auth.uid)).data.inviteId == inviteId
+        && existsAfter(noteMemberPath)
+        && getAfter(noteMemberPath).data.permission == resource.data.permission
+        && 'inviteId' in getAfter(noteMemberPath).data
+        && getAfter(noteMemberPath).data.inviteId == inviteId
         && resourceRefMatches(request.auth.uid, 'note-' + resource.data.resourceId, 'note', resource.data.resourceId, resource.data.permission));
     }
 
@@ -96,13 +176,18 @@ service cloud.firestore {
         && (!('category' in request.resource.data) || request.resource.data.category in ['today', 'monthly', 'gift'])
         && getAfter(/databases/$(database)/documents/shoppingLists/$(listId)/members/$(request.auth.uid)).data.permission == 'owner';
       allow read: if listActive(listId) || listOwner(listId);
-      allow update: if listOwner(listId) && (
-        (listActive(listId)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'category', 'updatedAt'])
+      allow update: if (listEditor(listId) && listActive(listId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'updatedAt', 'revision', 'updatedBy'])
           && request.resource.data.title is string
-          && request.resource.data.title.size() <= 120)
-        || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleting'])
-          && request.resource.data.deleting == true));
+          && request.resource.data.title.size() <= 120
+          && listTitleRevisionAdvances()
+          && request.resource.data.updatedBy == request.auth.uid)
+        || (listOwner(listId) && listActive(listId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['category', 'updatedAt'])
+          && request.resource.data.category in ['today', 'monthly', 'gift'])
+        || (listOwner(listId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleting'])
+          && request.resource.data.deleting == true);
       allow delete: if listOwner(listId)
         && resource.data.deleting == true
         && !existsAfter(/databases/$(database)/documents/shoppingLists/$(listId))
@@ -111,21 +196,29 @@ service cloud.firestore {
       match /members/{memberUid} {
         allow read: if listOwner(listId) || signedIn() && memberUid == request.auth.uid;
         allow create: if verified() && request.resource.data.uid == memberUid
-          && request.resource.data.keys().hasOnly(['uid', 'permission', 'joinedAt', 'inviteId', 'email'])
+          && request.resource.data.keys().hasOnly(['uid', 'permission', 'joinedAt', 'inviteId', 'email', 'connectionId'])
           && listActiveAfter(listId)
           && ((memberUid == request.auth.uid
             && request.resource.data.permission == 'owner'
             && getAfter(/databases/$(database)/documents/shoppingLists/$(listId)).data.ownerUid == request.auth.uid)
-            || (request.resource.data.inviteId is string
+            || (('inviteId' in request.resource.data)
+              && request.resource.data.inviteId is string
               && invitedBy(request.resource.data.inviteId, 'list', listId)
               && request.resource.data.email == request.auth.token.email.lower()
-              && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteId)).data.permission == request.resource.data.permission));
+              && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteId)).data.permission == request.resource.data.permission)
+            || (('connectionId' in request.resource.data)
+              && request.resource.data.connectionId is string
+              && request.resource.data.permission in ['shopper', 'editor']
+              && connectionShareGrant(request.resource.data.connectionId, 'list', listId, memberUid, request.resource.data.permission)));
         allow update: if listOwner(listId) && listActive(listId)
           && memberUid != request.auth.uid
           && resource.data.permission != 'owner'
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission', 'connectionId'])
           && request.resource.data.permission in ['shopper', 'editor']
-          && resourceRefMatches(memberUid, 'list-' + listId, 'list', listId, request.resource.data.permission);
+          && resourceRefMatches(memberUid, 'list-' + listId, 'list', listId, request.resource.data.permission)
+          && (!('connectionId' in request.resource.data)
+            || request.resource.data.connectionId == resource.data.connectionId
+            || connectionShareGrant(request.resource.data.connectionId, 'list', listId, memberUid, request.resource.data.permission));
         allow delete: if listOwner(listId) && (memberUid != request.auth.uid
           || !existsAfter(/databases/$(database)/documents/shoppingLists/$(listId)))
           || signedIn() && memberUid == request.auth.uid && resource.data.permission != 'owner';
@@ -134,21 +227,26 @@ service cloud.firestore {
       match /items/{itemId} {
         allow read: if listActive(listId) || listOwner(listId);
         allow create: if (listEditor(listId) || listEditorAfter(listId))
-          && request.resource.data.keys().hasOnly(['name', 'qty', 'status', 'price', 'createdAt', 'updatedAt', 'updatedBy'])
+          && request.resource.data.keys().hasOnly(['name', 'qty', 'status', 'price', 'revision', 'createdAt', 'updatedAt', 'updatedBy'])
           && request.resource.data.name is string
           && request.resource.data.qty is string
           && request.resource.data.status in ['new', 'pending', 'purchased', 'omitted']
+          && (!('revision' in request.resource.data) || request.resource.data.revision == 0)
           && (!('price' in request.resource.data) || request.resource.data.price is number && request.resource.data.price >= 0)
           && request.resource.data.updatedBy == request.auth.uid;
         allow update: if (listEditor(listId)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'qty', 'status', 'price', 'updatedAt', 'updatedBy'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'qty', 'status', 'price', 'revision', 'updatedAt', 'updatedBy'])
+          && request.resource.data.revision is int
+          && request.resource.data.revision == (('revision' in resource.data) ? resource.data.revision : 0) + 1
           && request.resource.data.name is string
           && request.resource.data.qty is string
           && request.resource.data.status in ['new', 'pending', 'purchased', 'omitted']
           && (!('price' in request.resource.data) || request.resource.data.price is number && request.resource.data.price >= 0)
           && request.resource.data.updatedBy == request.auth.uid)
           || (listActive(listId) && listRole(listId) == 'shopper'
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['price', 'status', 'updatedAt', 'updatedBy'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['price', 'status', 'revision', 'updatedAt', 'updatedBy'])
+          && request.resource.data.revision is int
+          && request.resource.data.revision == (('revision' in resource.data) ? resource.data.revision : 0) + 1
           && (!('price' in request.resource.data) || request.resource.data.price is number && request.resource.data.price >= 0)
           && request.resource.data.updatedBy == request.auth.uid
           && request.resource.data.status in ['pending', 'purchased']);
@@ -170,7 +268,8 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'body', 'revision', 'updatedAt', 'updatedBy'])
           && request.resource.data.title is string
           && request.resource.data.body is string
-          && request.resource.data.revision == resource.data.revision + 1
+          && request.resource.data.revision is int
+          && request.resource.data.revision == (('revision' in resource.data) ? resource.data.revision : 0) + 1
           && request.resource.data.updatedBy == request.auth.uid)
         || (noteOwner(noteId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleting'])
@@ -183,21 +282,29 @@ service cloud.firestore {
       match /members/{memberUid} {
         allow read: if noteOwner(noteId) || signedIn() && memberUid == request.auth.uid;
         allow create: if verified() && request.resource.data.uid == memberUid
-          && request.resource.data.keys().hasOnly(['uid', 'permission', 'joinedAt', 'inviteId', 'email'])
+          && request.resource.data.keys().hasOnly(['uid', 'permission', 'joinedAt', 'inviteId', 'email', 'connectionId'])
           && noteActiveAfter(noteId)
           && ((memberUid == request.auth.uid
             && request.resource.data.permission == 'owner'
             && getAfter(/databases/$(database)/documents/notes/$(noteId)).data.ownerUid == request.auth.uid)
-            || (request.resource.data.inviteId is string
+            || (('inviteId' in request.resource.data)
+              && request.resource.data.inviteId is string
               && invitedBy(request.resource.data.inviteId, 'note', noteId)
               && request.resource.data.email == request.auth.token.email.lower()
-              && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteId)).data.permission == request.resource.data.permission));
+              && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteId)).data.permission == request.resource.data.permission)
+            || (('connectionId' in request.resource.data)
+              && request.resource.data.connectionId is string
+              && request.resource.data.permission in ['viewer', 'editor']
+              && connectionShareGrant(request.resource.data.connectionId, 'note', noteId, memberUid, request.resource.data.permission)));
         allow update: if noteOwner(noteId) && noteActive(noteId)
           && memberUid != request.auth.uid
           && resource.data.permission != 'owner'
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission', 'connectionId'])
           && request.resource.data.permission in ['viewer', 'editor']
-          && resourceRefMatches(memberUid, 'note-' + noteId, 'note', noteId, request.resource.data.permission);
+          && resourceRefMatches(memberUid, 'note-' + noteId, 'note', noteId, request.resource.data.permission)
+          && (!('connectionId' in request.resource.data)
+            || request.resource.data.connectionId == resource.data.connectionId
+            || connectionShareGrant(request.resource.data.connectionId, 'note', noteId, memberUid, request.resource.data.permission));
         allow delete: if noteOwner(noteId) && (memberUid != request.auth.uid
           || !existsAfter(/databases/$(database)/documents/notes/$(noteId)))
           || signedIn() && memberUid == request.auth.uid && resource.data.permission != 'owner';
@@ -208,18 +315,35 @@ service cloud.firestore {
       allow read: if signedIn() && (request.auth.uid == uid
         || resource.data.kind == 'list' && listOwner(resource.data.resourceId)
         || resource.data.kind == 'note' && noteOwner(resource.data.resourceId));
-      allow create: if verified() && request.auth.uid == uid
+      allow create: if verified()
         && request.resource.data.keys().hasOnly(['kind', 'resourceId', 'permission', 'createdAt'])
-        && ((request.resource.data.kind == 'list'
+        && ((request.auth.uid == uid && request.resource.data.kind == 'list'
           && refId == 'list-' + request.resource.data.resourceId
           && listActiveAfter(request.resource.data.resourceId)
           && getAfter(/databases/$(database)/documents/shoppingLists/$(request.resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission)
-          || (request.resource.data.kind == 'note'
+          || (request.auth.uid == uid && request.resource.data.kind == 'note'
           && refId == 'note-' + request.resource.data.resourceId
           && noteActiveAfter(request.resource.data.resourceId)
-          && getAfter(/databases/$(database)/documents/notes/$(request.resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission));
+          && getAfter(/databases/$(database)/documents/notes/$(request.resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission)
+          || (request.resource.data.kind == 'list'
+            && refId == 'list-' + request.resource.data.resourceId
+            && listActiveAfter(request.resource.data.resourceId)
+            && existsAfter(/databases/$(database)/documents/shoppingLists/$(request.resource.data.resourceId)/members/$(uid))
+            && getAfter(/databases/$(database)/documents/shoppingLists/$(request.resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission
+            && getAfter(/databases/$(database)/documents/shoppingLists/$(request.resource.data.resourceId)/members/$(uid)).data.connectionId is string
+            && connectionShareGrant(getAfter(/databases/$(database)/documents/shoppingLists/$(request.resource.data.resourceId)/members/$(uid)).data.connectionId, 'list', request.resource.data.resourceId, uid, request.resource.data.permission))
+          || (request.resource.data.kind == 'note'
+            && refId == 'note-' + request.resource.data.resourceId
+            && noteActiveAfter(request.resource.data.resourceId)
+            && existsAfter(/databases/$(database)/documents/notes/$(request.resource.data.resourceId)/members/$(uid))
+            && getAfter(/databases/$(database)/documents/notes/$(request.resource.data.resourceId)/members/$(uid)).data.permission == request.resource.data.permission
+            && getAfter(/databases/$(database)/documents/notes/$(request.resource.data.resourceId)/members/$(uid)).data.connectionId is string
+            && connectionShareGrant(getAfter(/databases/$(database)/documents/notes/$(request.resource.data.resourceId)/members/$(uid)).data.connectionId, 'note', request.resource.data.resourceId, uid, request.resource.data.permission)));
       allow update: if verified()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission'])
+        && request.resource.data.keys().hasOnly(['kind', 'resourceId', 'permission', 'createdAt'])
+        && request.resource.data.kind == resource.data.kind
+        && request.resource.data.resourceId == resource.data.resourceId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['permission', 'createdAt'])
         && ((resource.data.kind == 'list'
           && refId == 'list-' + resource.data.resourceId
           && listOwner(resource.data.resourceId)
@@ -258,6 +382,150 @@ service cloud.firestore {
         && request.resource.data.acceptedBy == request.auth.uid
         && acceptedInviteHasMembership(inviteId);
       allow delete: if verified() && resource.data.ownerUid == request.auth.uid;
+    }
+
+    // Public directory records intentionally contain no email, photo, or private data.
+    match /userProfiles/{uid} {
+      allow read: if verified();
+      allow create: if verified()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['uid', 'username', 'usernameKey', 'displayName', 'createdAt'])
+        && request.resource.data.uid == uid
+        && request.resource.data.username is string
+        && request.resource.data.usernameKey is string
+        && request.resource.data.username == request.resource.data.usernameKey
+        && request.resource.data.usernameKey.matches('^[a-z0-9_]{3,24}$')
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() <= 60
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.usernameKey)).data.uid == uid;
+      allow update: if verified() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() <= 60;
+      allow delete: if false;
+    }
+
+    match /usernames/{usernameKey} {
+      allow read: if verified();
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['uid', 'username', 'createdAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.username == usernameKey
+        && usernameKey.matches('^[a-z0-9_]{3,24}$')
+        && getAfter(/databases/$(database)/documents/userProfiles/$(request.auth.uid)).data.usernameKey == usernameKey;
+      allow update, delete: if false;
+    }
+
+    match /connectionInvites/{inviteId} {
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['senderUid', 'senderUsername', 'recipientUid', 'recipientEmail', 'status', 'createdAt', 'expiresAt'])
+        && request.resource.data.senderUid == request.auth.uid
+        && request.resource.data.senderUsername is string
+        && request.resource.data.senderUsername.size() <= 24
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.status == 'pending'
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(7, 'd')
+        && ((('recipientUid' in request.resource.data)
+          && request.resource.data.recipientUid is string
+          && request.resource.data.recipientUid != request.auth.uid
+          && inviteId == 'request-' + request.auth.uid + '-' + request.resource.data.recipientUid
+          && !('recipientEmail' in request.resource.data))
+          || (('recipientEmail' in request.resource.data)
+            && request.resource.data.recipientEmail is string
+            && request.resource.data.recipientEmail.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$')
+            && !request.resource.data.recipientEmail.matches('^.*/.*$')
+            && inviteId == 'request-' + request.auth.uid + '-' + request.resource.data.recipientEmail
+            && request.auth.token.email is string
+            && request.resource.data.recipientEmail != request.auth.token.email.lower()
+            && !('recipientUid' in request.resource.data)));
+      allow get: if verified() && (inviteId.matches('^request-' + request.auth.uid + '-.+$')
+        || resource.data.senderUid == request.auth.uid
+        || ('recipientUid' in resource.data && resource.data.recipientUid == request.auth.uid)
+        || ('recipientEmail' in resource.data && request.auth.token.email is string
+          && resource.data.recipientEmail == request.auth.token.email.lower()));
+      allow list: if verified() && (resource.data.senderUid == request.auth.uid
+        || ('recipientUid' in resource.data && resource.data.recipientUid == request.auth.uid)
+        || ('recipientEmail' in resource.data && request.auth.token.email is string
+          && resource.data.recipientEmail == request.auth.token.email.lower()));
+      allow update: if verified()
+        && resource.data.status == 'pending'
+        && resource.data.expiresAt > request.time
+        && (('recipientUid' in resource.data && resource.data.recipientUid == request.auth.uid)
+          || ('recipientEmail' in resource.data && request.auth.token.email is string
+            && resource.data.recipientEmail == request.auth.token.email.lower()))
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedBy', 'acceptedAt', 'declinedAt', 'connectionId'])
+        && ((request.resource.data.status == 'accepted'
+          && request.resource.data.acceptedBy == request.auth.uid
+          && request.resource.data.acceptedAt is timestamp
+          && request.resource.data.acceptedAt <= request.time
+          && request.resource.data.acceptedAt < resource.data.expiresAt
+          && request.resource.data.connectionId is string
+          && request.resource.data.connectionId == canonicalConnectionId(resource.data.senderUid, request.auth.uid))
+          || request.resource.data.status == 'declined');
+      allow update: if verified()
+        && resource.data.senderUid == request.auth.uid
+        && (resource.data.status == 'declined' || resource.data.status == 'pending' && resource.data.expiresAt <= request.time)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['senderUsername', 'status', 'createdAt', 'expiresAt', 'declinedAt', 'acceptedBy', 'acceptedAt', 'connectionId'])
+        && request.resource.data.senderUid == resource.data.senderUid
+        && request.resource.data.senderUsername is string
+        && request.resource.data.senderUsername.size() <= 24
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.expiresAt is timestamp
+        && (('recipientUid' in request.resource.data) == ('recipientUid' in resource.data))
+        && (!('recipientUid' in resource.data) || request.resource.data.recipientUid == resource.data.recipientUid)
+        && (('recipientEmail' in request.resource.data) == ('recipientEmail' in resource.data))
+        && (!('recipientEmail' in resource.data) || request.resource.data.recipientEmail == resource.data.recipientEmail)
+        && request.resource.data.status == 'pending'
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(7, 'd')
+        && !('declinedAt' in request.resource.data)
+        && !('acceptedBy' in request.resource.data)
+        && !('acceptedAt' in request.resource.data)
+        && !('connectionId' in request.resource.data);
+      allow delete: if verified() && resource.data.senderUid == request.auth.uid && resource.data.status == 'pending';
+    }
+
+    match /connections/{connectionId} {
+      allow read: if verified() && request.auth.uid in resource.data.memberUids;
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['memberUids', 'status', 'inviteId', 'createdAt', 'updatedAt'])
+        && request.resource.data.memberUids is list
+        && request.resource.data.memberUids.size() == 2
+        && request.resource.data.memberUids[0] is string
+        && request.resource.data.memberUids[1] is string
+        && request.resource.data.memberUids[0].matches('^[^~]+$')
+        && request.resource.data.memberUids[1].matches('^[^~]+$')
+        && connectionId == canonicalConnectionId(request.resource.data.memberUids[0], request.resource.data.memberUids[1])
+        && request.auth.uid in request.resource.data.memberUids
+        && request.resource.data.status == 'active'
+        && request.resource.data.inviteId is string
+        && connectionInviteAccepted(request.resource.data.inviteId, connectionId);
+      allow update: if verified()
+        && request.auth.uid in resource.data.memberUids
+        && resource.data.status == 'active'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updatedAt'])
+        && request.resource.data.memberUids == resource.data.memberUids
+        && request.resource.data.status == 'active';
+      allow delete: if false;
+
+      match /sharedResources/{shareId} {
+        allow read: if verified() && exists(/databases/$(database)/documents/connections/$(connectionId))
+          && request.auth.uid in get(/databases/$(database)/documents/connections/$(connectionId)).data.memberUids;
+        allow create, update: if shareId == request.resource.data.kind + '-' + request.resource.data.resourceId
+          && ((request.resource.data.kind == 'list'
+            && request.resource.data.permission in ['shopper', 'editor']
+            && validSharedResourceWrite(connectionId, 'list', request.resource.data.resourceId))
+            || (request.resource.data.kind == 'note'
+            && request.resource.data.permission in ['viewer', 'editor']
+            && validSharedResourceWrite(connectionId, 'note', request.resource.data.resourceId)))
+          && request.resource.data.keys().hasOnly(['kind', 'resourceId', 'fromUid', 'toUid', 'permission', 'title', 'createdAt', 'updatedAt']);
+        allow delete: if verified()
+          && resource.data.fromUid == request.auth.uid
+          && ((resource.data.kind == 'list' && listOwner(resource.data.resourceId))
+            || (resource.data.kind == 'note' && noteOwner(resource.data.resourceId)));
+      }
     }
   }
 }

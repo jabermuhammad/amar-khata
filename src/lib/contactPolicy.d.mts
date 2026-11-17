@@ -1,0 +1,11 @@
+export function normalizeUsername(value: unknown): string;
+export function normalizeContactEmail(value: unknown): string;
+export function connectionIdFor(firstUid: string, secondUid: string): string;
+export function connectionInviteIdFor(senderUid: string, recipient: { uid: string } | { email: string }): string;
+export function connectionInviteExpiresAt(createdAt: Date | number, lifetimeMs?: number): Date;
+export function isConnectionInviteExpired(invite: { expiresAt?: unknown }, now?: number): boolean;
+export function assertConnectionMember(connection: unknown, uid: string): string;
+export function assertConnectionCounterpart(connectionId: string, connection: unknown, uid: string, expectedContactUid: string): string;
+export function validateSharedPermission(kind: 'list' | 'note', permission: string): string;
+export function filterConnectedContacts<T extends { profile: { displayName: string; username: string } }>(contacts: T[], query: string): T[];
+export function resolveOutgoingInvite(invites: { id: string; recipientUid?: string; recipientEmail?: string; status: string; acceptedBy?: string; expiresAt?: unknown }[], recipient: { uid?: string; email?: string }, now?: number): { status: 'connected' } | { status: 'pending'; id: string } | { status: 'new' };

@@ -1,30 +1,16 @@
-import React from 'react';
-import { Pressable as NativePressable, StyleSheet, View, type PressableProps } from 'react-native';
+import React, { useContext } from 'react';
+import { Pressable as NativePressable, type PressableProps, type PressableStateCallbackType, type StyleProp, type ViewStyle } from 'react-native';
+import { ThemeSurfaceContext, adaptThemeStyle, styleIsAccent } from './ThemePrimitives';
+import { useTheme } from '../contexts/ThemeContext';
 
-const glossColor = 'rgba(255,255,255,0.18)';
-
-/** Adds a restrained top highlight and shallow depth to solid interactive surfaces. */
+/** Kept as the app-wide Pressable alias; preserves caller styles and behavior. */
 export function GlossyPressable({ style, children, ...props }: PressableProps) {
-  if (typeof style === 'function' || typeof children === 'function') {
-    return <NativePressable {...props} style={style}>{children}</NativePressable>;
-  }
-  const flattened = StyleSheet.flatten(style);
-  const backgroundColor = flattened?.backgroundColor;
-  const hasGloss = typeof backgroundColor === 'string' && backgroundColor !== 'transparent' && !backgroundColor.startsWith('rgba(');
-  if (!hasGloss || !flattened) return <NativePressable {...props} style={style}>{children}</NativePressable>;
-  const radius = flattened.borderRadius || 0;
-  return (
-    <NativePressable
-      {...props}
-      style={style}
-    >
-      {children}
-      <View pointerEvents="none" style={[s.gloss, {
-        borderTopLeftRadius: flattened.borderTopLeftRadius || radius,
-        borderTopRightRadius: flattened.borderTopRightRadius || radius,
-      }]} />
-    </NativePressable>
-  );
+  const { theme } = useTheme();
+  const inheritedAccent = useContext(ThemeSurfaceContext);
+  const accent = styleIsAccent(style) || inheritedAccent;
+  const themedStyle: PressableProps['style'] = typeof style === 'function'
+    ? (state: PressableStateCallbackType) => adaptThemeStyle(style(state), theme, accent) as StyleProp<ViewStyle>
+    : adaptThemeStyle(style, theme, accent) as StyleProp<ViewStyle>;
+  if (typeof children === 'function') return <NativePressable {...props} style={themedStyle}>{state => <ThemeSurfaceContext.Provider value={accent}>{children(state)}</ThemeSurfaceContext.Provider>}</NativePressable>;
+  return <NativePressable {...props} style={themedStyle}><ThemeSurfaceContext.Provider value={accent}>{children}</ThemeSurfaceContext.Provider></NativePressable>;
 }
-
-const s = StyleSheet.create({ gloss: { position: 'absolute', top: 0, left: 1, right: 1, height: 2, backgroundColor: glossColor } });

@@ -62,6 +62,19 @@ Expo public variables are embedded in the client app and are not a place for pri
 
 The production EAS profile also supplies `EXPO_PUBLIC_UPDATE_MANIFEST_URL`. APK updates are maintained separately in the `amar-khata-updates` repository; do not place APK release assets or its runtime `update.json` in this source repository.
 
+## Google Sign-In setup
+
+Google Sign-In uses Firebase Authentication with the native Android Credential Manager flow. Set `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` in `.env.local` for local builds and in each EAS environment used for builds. The value is the OAuth **Web application** client ID; it is passed to the native library to obtain a Google ID token, which Firebase Authentication verifies. Do not put an OAuth client secret in the app.
+
+Before using Google Sign-In:
+
+1. In Firebase Console, enable Google under Authentication → Sign-in method and set the project support email if prompted.
+2. In Google Cloud Console, configure the OAuth consent screen and create an Android OAuth client for package `com.jabermuhammad1.amarkhatamobile`. Register the SHA-1 certificate fingerprint(s) for the build(s) you will install, including the existing EAS-managed signing certificate and any debug certificate used for local development.
+3. Create or identify the OAuth Web application client in the same Google Cloud/Firebase project and set its client ID as `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` in the local/EAS build environment. Keep the client secret private; this mobile app only needs the public client ID.
+4. Build and install an Expo development or preview APK containing the native module. Google Sign-In cannot run in Expo Go; changing JavaScript alone is not enough to add the native Credential Manager module to an already-built APK.
+
+Google Sign-In creates a Firebase account on first successful Google login and signs into the same Firebase UID on later logins. If the email already belongs to an Email/Password account, the app requires that account's password and links the Google credential only after the authenticated Firebase email matches. A Google credential already attached to another Firebase UID is not automatically merged. The app does not request Drive or Contacts scopes.
+
 ## Development checks
 
 ```sh

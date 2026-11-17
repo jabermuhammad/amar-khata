@@ -4,6 +4,9 @@
       "distribution": "internal",
       "environment": "preview",
       "pnpm": "11.25.0",
+      "env": {
+        "EXPO_PUBLIC_UPDATE_MANIFEST_URL": "https://raw.githubusercontent.com/jabermuhammad/amar-khata-updates/main/preview/update.json"
+      },
       "android": {
         "buildType": "apk"
       }

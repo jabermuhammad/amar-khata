@@ -61,3 +61,11 @@ google-services.json
 GoogleService-Info.plist
 *service-account*.json
 *firebase-adminsdk*.json
+
+# Unnecessary local files; keep originals on disk
+/\!note.cloudId)
+/{
+/tmp/pdf-reference-20261104/ref-1.png
+/.amar-khata-archive-audit-20261104/
+/tmp/
+/tatus --short*

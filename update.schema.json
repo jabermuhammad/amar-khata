@@ -26,7 +26,7 @@
     },
     "apkUrl": {
       "type": "string",
-      "pattern": "^https://"
+      "pattern": "^https://github\\.com/jabermuhammad/amar-khata-updates/releases/download/[^/?#]+/[^/?#]+\\.apk$"
     },
     "sha256": {
       "type": "string",
